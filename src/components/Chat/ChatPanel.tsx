@@ -154,7 +154,7 @@ export default function ChatPanel() {
             <div className="p-4 border-b border-zinc-800 bg-zinc-900/50 backdrop-blur-sm">
                 <h2 className="text-lg font-semibold flex items-center gap-2 text-zinc-100">
                     <Bot className="w-5 h-5 text-indigo-400" />
-                    AI Planner
+                    idea.ai
                 </h2>
                 <p className="text-xs text-zinc-500">
                     {isLoading && progress > 0 && progress < 1 ? `Loading Brain: ${(progress * 100).toFixed(0)}%` : "Powered by WebLLM"}
