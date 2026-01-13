@@ -87,10 +87,15 @@ export const parseAIResponse = (response: string, goal: string, existingNodes: a
       message = line.replace('QUESTION:', '').trim();
     } else if (line.startsWith('TOPIC') || line.startsWith('NEWTOPIC')) {
       const content = line.replace(/^(TOPIC\d?|NEWTOPIC):?\s*/, '');
-      const [name, desc] = content.split('|').map(s => s.trim());
-      if (name && !name.includes('[')) topics.push({ name, desc: desc || name });
+      let [name, desc] = content.split('|').map(s => s.trim());
+      // V46: Strip brackets instead of rejecting
+      name = name.replace(/^\[|\]$/g, '').trim();
+      desc = (desc || name).replace(/^\[|\]$/g, '').trim();
+      if (name && name.length > 0) topics.push({ name, desc });
     } else if (line.startsWith('OPTIONS:')) {
-      options = line.replace('OPTIONS:', '').split(',').map(s => s.trim()).filter(s => s && !s.includes('['));
+      options = line.replace('OPTIONS:', '').split(',')
+        .map(s => s.trim().replace(/^\[|\]$/g, ''))
+        .filter(s => s && s.length > 0);
     } else if (line.startsWith('PARENT:')) {
       parentName = line.replace('PARENT:', '').trim();
     }
