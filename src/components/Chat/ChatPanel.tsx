@@ -5,7 +5,7 @@ import { Send, Bot, User as UserIcon, Loader2 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useStore } from '@/lib/store';
-import { aiService } from '@/services/ai';
+import { aiService, parseAIResponse } from '@/services/ai';
 import { InitProgressReport } from '@mlc-ai/web-llm';
 
 export default function ChatPanel() {
@@ -18,6 +18,7 @@ export default function ChatPanel() {
     const messages = useStore((state) => state.messages);
     const addMessage = useStore((state) => state.addMessage);
     const goal = useStore((state) => state.goal);
+    const nodes = useStore((state) => state.nodes);
     const getMindMapAsJSON = useStore((state) => state.getMindMapAsJSON);
     const setMindMapFromJSON = useStore((state) => state.setMindMapFromJSON);
     const getMessagesForAI = useStore((state) => state.getMessagesForAI);
@@ -25,6 +26,7 @@ export default function ChatPanel() {
     // Proactive Greeting Ref to ensure it only runs once
     const hasInitializedRef = useRef(false);
     const scrollRef = useRef<HTMLDivElement>(null);
+    const lastUserMessageRef = useRef<string>('');
 
     // Auto-scroll to bottom
     useEffect(() => {
@@ -55,7 +57,7 @@ export default function ChatPanel() {
                         }
                     );
 
-                    processAIResponse(response);
+                    processAIResponse(response, true);
 
                 } catch (e) {
                     console.error("Proactive greeting failed", e);
@@ -67,56 +69,48 @@ export default function ChatPanel() {
         initChat();
     }, [goal, messages.length]);
 
-    // V39: Process AI response with null handling
-    const processAIResponse = (response: string) => {
-        console.log("V39 DEBUG: Raw AI response:", response);
+    // V42: Process AI response using parser
+    const processAIResponse = (response: string, isFirstTurn: boolean = false) => {
+        console.log("V42 DEBUG: Raw AI response:", response);
 
-        let cleanResponse = "";
-        let suggestions: string[] = [];
-        let parsedData: any = null;
+        // V42: Try to parse as simple text format first
+        const newNodeId = `node-${Date.now()}-user`;
+        const parentId = nodes.length > 0 ? nodes[0].id : 'root';
+        const lastUserMsg = lastUserMessageRef.current;
 
-        // 1. Try to parse the JSON response
+        let parsedData;
+
+        // First try JSON parsing (backwards compatibility)
         try {
             const jsonMatch = response.match(/\{[\s\S]*\}/);
             if (jsonMatch) {
                 parsedData = JSON.parse(jsonMatch[0]);
-                console.log("V39 DEBUG: Parsed JSON:", parsedData);
+                console.log("V42 DEBUG: Parsed as JSON:", parsedData);
             }
         } catch (e) {
-            console.warn("V39 DEBUG: JSON Parse Failed:", e);
+            // Not JSON, use text parser
         }
 
-        // 2. Apply the schema
-        if (parsedData) {
-            // V39: Handle null assistantResponse - generate default question
-            cleanResponse = parsedData.assistantResponse || parsedData.message || "";
-
-            // V39: If assistantResponse is null/empty, create a default question
-            if (!cleanResponse && parsedData.updatedMindMap?.nodes?.length > 1) {
-                const firstTopic = parsedData.updatedMindMap.nodes[1]?.label || "this project";
-                cleanResponse = `What aspect of ${firstTopic} would you like to explore first?`;
-                console.log("V39 DEBUG: Generated default question:", cleanResponse);
-            }
-
-            suggestions = parsedData.suggestions || parsedData.options || [];
-
-            // V39: Clean up suggestions that might have formatting issues
-            suggestions = suggestions
-                .filter((s: string) => s && typeof s === 'string')
-                .map((s: string) => s.replace(/[\[\]]/g, '').trim())
-                .filter((s: string) => s.length > 0 && s.length < 100);
-
-            // Update mind map
-            if (parsedData.updatedMindMap) {
-                console.log("V39 DEBUG: updatedMindMap found:", parsedData.updatedMindMap);
-                setMindMapFromJSON(parsedData.updatedMindMap);
-            }
+        // If no JSON or JSON failed, use text parser
+        if (!parsedData || !parsedData.assistantResponse) {
+            console.log("V42 DEBUG: Using text parser");
+            parsedData = parseAIResponse(response, goal, nodes, newNodeId, parentId, lastUserMsg);
+            console.log("V42 DEBUG: Parsed result:", parsedData);
         }
 
-        // 3. Final fallback
-        if (!cleanResponse) {
-            console.warn("V39 DEBUG: No cleanResponse, using fallback");
-            cleanResponse = "What would you like to focus on first?";
+        let cleanResponse = parsedData.assistantResponse || "What would you like to explore?";
+        let suggestions = parsedData.suggestions || [];
+
+        // Clean up suggestions
+        suggestions = suggestions
+            .filter((s: string) => s && typeof s === 'string')
+            .map((s: string) => s.replace(/[\[\]]/g, '').trim())
+            .filter((s: string) => s.length > 0 && s.length < 100);
+
+        // Update mind map
+        if (parsedData.updatedMindMap) {
+            console.log("V42 DEBUG: Updating mind map:", parsedData.updatedMindMap);
+            setMindMapFromJSON(parsedData.updatedMindMap);
         }
 
         addMessage('assistant', cleanResponse, suggestions);
@@ -125,7 +119,7 @@ export default function ChatPanel() {
         setProgress(0);
     };
 
-    // V34: Send message with debug logging
+    // V42: Send message with debug logging
     const handleSend = async (textOverride?: string) => {
         const textToSend = typeof textOverride === 'string' ? textOverride : input;
 
@@ -135,17 +129,19 @@ export default function ChatPanel() {
         addMessage('user', textToSend);
         setIsLoading(true);
 
+        // V42: Store last user message for parser
+        lastUserMessageRef.current = textToSend;
+
         try {
-            // V34: Debug chat history
             const chatHistory = getMessagesForAI();
             chatHistory.push({ role: 'user', content: textToSend });
-            console.log("V34 DEBUG: Chat history being sent:", chatHistory);
+            console.log("V42 DEBUG: Chat history being sent:", chatHistory);
 
             const currentMapJSON = getMindMapAsJSON();
-            console.log("V34 DEBUG: Current map being sent:", currentMapJSON);
+            console.log("V42 DEBUG: Current map being sent:", currentMapJSON);
 
             const response = await aiService.chat(goal, chatHistory, currentMapJSON);
-            processAIResponse(response);
+            processAIResponse(response, false);
 
         } catch (error) {
             console.error("V34 DEBUG: AI Error:", error);

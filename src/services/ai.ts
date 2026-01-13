@@ -3,86 +3,119 @@ import { CreateMLCEngine, MLCEngine, InitProgressCallback } from "@mlc-ai/web-ll
 const SELECTED_MODEL = "Qwen2.5-1.5B-Instruct-q4f32_1-MLC";
 
 // ============================================================================
-// V41: PROACTIVE AI - Suggests options, correct JSON format, contextual links
+// V42: SIMPLE FORMAT - AI outputs text, code builds structure
 // ============================================================================
 
 /**
- * System message - AI should SUGGEST, not just ask
+ * System message - Simple output format
  */
-const SYSTEM_MESSAGE = `You are a proactive planning assistant. Your job is to:
-1. SUGGEST specific options based on your knowledge (don't just ask questions)
-2. When user asks about tech, RECOMMEND specific technologies
-3. Create mind map nodes with your suggestions
-4. Keep questions SHORT (1 sentence)
-
-Example: If user asks "what tech stack?", suggest: "For a SaaS, I recommend React + Node.js + PostgreSQL. Which area: frontend, backend, or database?"
-
-CRITICAL: Your JSON must have this EXACT structure:
-- updatedMindMap.nodes: ARRAY of node objects
-- updatedMindMap.edges: ARRAY of edge objects
-Never use node IDs as object keys.`;
+const SYSTEM_MESSAGE = `You are a helpful planning assistant for building projects.
+When asked about a goal, suggest 3 specific topics to explore.
+Keep responses SHORT and specific.
+Use your knowledge to SUGGEST real options (technologies, strategies, etc).`;
 
 /**
- * FIRST TURN: Exact format with arrays
+ * FIRST TURN: Just ask for topics, no JSON template
  */
 const buildFirstTurnUserMessage = (goal: string): string => {
-  return `GOAL: "${goal}"
+  return `Goal: ${goal}
 
-Create initial mind map with 3 topics. SUGGEST specific things based on your knowledge.
+Suggest 3 specific topics to explore for this goal.
 
-REQUIRED JSON FORMAT:
-{
-  "assistantResponse": "Your question mentioning the actual topics",
-  "updatedMindMap": {
-    "nodes": [
-      {"id": "root", "label": "${goal.slice(0, 25)}", "description": "${goal}"},
-      {"id": "aspect-1", "label": "REAL TOPIC NAME", "description": "Why this matters"},
-      {"id": "aspect-2", "label": "REAL TOPIC NAME", "description": "Why this matters"},
-      {"id": "aspect-3", "label": "REAL TOPIC NAME", "description": "Why this matters"}
-    ],
-    "edges": [
-      {"source": "root", "target": "aspect-1"},
-      {"source": "root", "target": "aspect-2"},
-      {"source": "root", "target": "aspect-3"}
-    ]
-  },
-  "suggestions": ["Topic 1 name", "Topic 2 name", "Topic 3 name", "Other"]
-}
+Reply in this EXACT format:
+QUESTION: [Your question asking which topic to focus on]
+TOPIC1: [First topic name]|[Brief description]
+TOPIC2: [Second topic name]|[Brief description]  
+TOPIC3: [Third topic name]|[Brief description]
+OPTIONS: [Option1], [Option2], [Option3]
 
-Remember: nodes and edges must be ARRAYS, not objects with ID keys.`;
+Example for "build a mobile app":
+QUESTION: Would you like to focus on UI design, backend development, or app publishing?
+TOPIC1: UI Design|Creating user interface and experience
+TOPIC2: Backend Development|Server-side logic and APIs
+TOPIC3: App Publishing|Submitting to app stores
+OPTIONS: UI Design, Backend, Publishing, Other`;
 };
 
 /**
- * SUBSEQUENT TURNS: Proactive suggestions, contextual parent
+ * SUBSEQUENT TURNS: Simple format for new topics
  */
 const buildMainTurnUserMessage = (
   goal: string,
   lastUserMessage: string,
-  conversationSummary: string,
-  nodesList: string,
-  newNodeId: string,
-  suggestedParentId: string,
-  suggestedParentLabel: string
+  conversationSummary: string
 ): string => {
-  return `USER: "${lastUserMessage}"
+  return `User said: "${lastUserMessage}"
+Project: ${goal}
 
-BE PROACTIVE: If user asks about tech/tools, SUGGEST specific ones (React, Node.js, etc.)
-Don't just ask - provide your recommendations!
+Previous: ${conversationSummary}
 
-NEW NODE: id="${newNodeId}", label based on "${lastUserMessage}"
-PARENT: Connect to "${suggestedParentId}" (${suggestedParentLabel}) or pick closer match from: ${nodesList}
+Respond to what the user said. If they ask about tech, SUGGEST specific technologies.
 
-REQUIRED JSON (nodes and edges must be ARRAYS):
-{
-  "assistantResponse": "Short question OR your recommendation",
-  "updatedMindMap": {
-    "nodes": [{"id": "${newNodeId}", "label": "Topic Name", "description": "Details"}],
-    "edges": [{"source": "${suggestedParentId}", "target": "${newNodeId}"}]
-  },
-  "suggestions": ["Specific option 1", "Specific option 2", "Specific option 3"]
-}
+Reply format:
+QUESTION: [Short follow-up question or recommendation]
+NEWTOPIC: [Topic name based on user's message]|[Description]
+OPTIONS: [Option1], [Option2], [Option3]`;
+};
 
-Context: ${conversationSummary}`;
+/**
+ * Parse simple text format into JSON structure
+ */
+export const parseAIResponse = (response: string, goal: string, existingNodes: any[], newNodeId: string, parentId: string, lastUserMessage: string) => {
+  const lines = response.split('\n').filter(l => l.trim());
+
+  let question = "What would you like to explore?";
+  const topics: { name: string, desc: string }[] = [];
+  let options: string[] = [];
+
+  for (const line of lines) {
+    if (line.startsWith('QUESTION:')) {
+      question = line.replace('QUESTION:', '').trim();
+    } else if (line.startsWith('TOPIC') || line.startsWith('NEWTOPIC:')) {
+      const content = line.replace(/^(TOPIC\d?|NEWTOPIC):?\s*/, '');
+      const [name, desc] = content.split('|').map(s => s.trim());
+      if (name) topics.push({ name, desc: desc || name });
+    } else if (line.startsWith('OPTIONS:')) {
+      options = line.replace('OPTIONS:', '').split(',').map(s => s.trim()).filter(Boolean);
+    }
+  }
+
+  // Build proper JSON structure
+  const isFirstTurn = existingNodes.length === 0;
+
+  if (isFirstTurn) {
+    // First turn: create root + topics
+    const nodes = [
+      { id: "root", label: goal.slice(0, 30), description: goal },
+      ...topics.slice(0, 3).map((t, i) => ({
+        id: `aspect-${i + 1}`,
+        label: t.name,
+        description: t.desc
+      }))
+    ];
+    const edges = topics.slice(0, 3).map((_, i) => ({
+      source: "root",
+      target: `aspect-${i + 1}`
+    }));
+
+    return {
+      assistantResponse: question,
+      updatedMindMap: { nodes, edges },
+      suggestions: options.length > 0 ? options : topics.map(t => t.name)
+    };
+  } else {
+    // Subsequent turns: add new node
+    const newTopic = topics[0] || { name: lastUserMessage || "New Topic", desc: "User topic" };
+
+    return {
+      assistantResponse: question,
+      updatedMindMap: {
+        nodes: [{ id: newNodeId, label: newTopic.name, description: newTopic.desc }],
+        edges: [{ source: parentId, target: newNodeId }]
+      },
+      suggestions: options
+    };
+  }
 };
 
 // ============================================================================
@@ -136,7 +169,7 @@ export class AIService {
         content: buildFirstTurnUserMessage(initialGoal)
       });
     } else {
-      // Get the last user message prominently
+      // V42: Get the last user message
       const lastUserMsg = chatHistory[chatHistory.length - 1]?.content || "";
 
       // Build conversation summary (excluding last message)
@@ -145,44 +178,9 @@ export class AIService {
         .map(m => `${m.role}: ${m.content}`)
         .join('\n');
 
-      // V41: Find contextually best parent node
-      let nodesList = "root";
-      let suggestedParentId = "root";
-      let suggestedParentLabel = "root";
-
-      try {
-        const mapData = JSON.parse(currentMindMapJSON);
-        if (mapData.nodes && Array.isArray(mapData.nodes)) {
-          nodesList = mapData.nodes
-            .map((n: any) => `${n.id}: "${n.label}"`)
-            .join(', ');
-
-          // V41: Find best parent by checking if user message relates to any node label
-          const userMsgLower = lastUserMsg.toLowerCase();
-          let bestMatch = mapData.nodes[0]; // default to root
-
-          for (const node of mapData.nodes) {
-            const label = (node.data?.label || node.label || "").toLowerCase();
-            // Check if user message contains node label or vice versa
-            if (label && (userMsgLower.includes(label) || label.includes(userMsgLower.split(' ')[0]))) {
-              bestMatch = node;
-              break;
-            }
-          }
-
-          suggestedParentId = bestMatch.id || "root";
-          suggestedParentLabel = bestMatch.data?.label || bestMatch.label || "root";
-        }
-      } catch (e) {
-        console.warn("Could not parse mind map");
-      }
-
-      // V41: Pre-generate a unique node ID
-      const newNodeId = `node-${Date.now()}-user`;
-
       messages.push({
         role: "user",
-        content: buildMainTurnUserMessage(initialGoal, lastUserMsg, summary, nodesList, newNodeId, suggestedParentId, suggestedParentLabel)
+        content: buildMainTurnUserMessage(initialGoal, lastUserMsg, summary)
       });
     }
 
@@ -191,8 +189,8 @@ export class AIService {
     const reply = await engine.chat.completions.create({
       messages: messages as any,
       temperature: 0.7, // Higher for more creativity, less template copying
-      max_tokens: 600,
-      response_format: { type: "json_object" },
+      max_tokens: 400,
+      // V42: No JSON format - using simple text format
     });
 
     const response = reply.choices[0].message.content || "";
