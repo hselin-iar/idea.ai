@@ -43,28 +43,30 @@ OPTIONS: Tech Stack, Authentication, Payments`;
 };
 
 /**
- * SUBSEQUENT TURNS: Expand from the topic user mentioned
+ * V45: Expand with UNIQUE new sub-topics, short message
  */
 const buildMainTurnUserMessage = (
   goal: string,
   lastUserMessage: string,
   conversationSummary: string,
-  leafNodes: string
+  leafNodes: string,
+  existingLabels: string
 ): string => {
-  return `User wants to expand: "${lastUserMessage}"
-Project: ${goal}
+  return `User said: "${lastUserMessage}"
 
-Current leaf topics (outermost nodes): ${leafNodes}
+EXISTING NODES (DO NOT REUSE THESE NAMES): ${existingLabels}
 
-Add 2-3 NEW sub-topics under "${lastUserMessage}" with SPECIFIC details.
-Use your knowledge to suggest real options.
+Create 2-3 NEW sub-topics with UNIQUE names (not from the list above).
+Put DETAILS in the nodes, keep MESSAGE short (1 sentence).
 
 Reply format:
-MESSAGE: [Short response about ${lastUserMessage}]
-NEWTOPIC: [Sub-topic name]|[Specific details]
-NEWTOPIC: [Another sub-topic]|[Specific details]
-PARENT: [Name of topic to connect these to]
-OPTIONS: [Sub-topic 1], [Sub-topic 2], [Sub-topic 3]`;
+MESSAGE: Got it, adding details about ${lastUserMessage.slice(0, 20)}...
+NEWTOPIC: [NEW unique name]|[Detailed content about this aspect]
+NEWTOPIC: [Another NEW name]|[More specific details]
+PARENT: ${leafNodes.split(',')[0]?.trim() || 'root'}
+OPTIONS: [Name1], [Name2], [Name3]
+
+IMPORTANT: Create NEW node names like "Frontend Framework", "Database Choice", "API Design" - NOT "User Authentication" or "Payment Integration" which already exist!`;
 };
 
 /**
@@ -228,12 +230,15 @@ export class AIService {
 
       // V43: Find leaf nodes (outermost - nodes that are not sources of any edge)
       let leafNodeLabels = "root";
+      let existingLabels = "";
       try {
         const mapData = JSON.parse(currentMindMapJSON);
         if (mapData.nodes && mapData.edges) {
           const sourceIds = new Set(mapData.edges.map((e: any) => e.source));
           const leafNodes = mapData.nodes.filter((n: any) => !sourceIds.has(n.id));
           leafNodeLabels = leafNodes.map((n: any) => n.label || n.data?.label).join(', ');
+          // V45: Get all existing labels to prevent duplicates
+          existingLabels = mapData.nodes.map((n: any) => n.label || n.data?.label).join(', ');
         }
       } catch (e) {
         console.warn("Could not parse mind map for leaf nodes");
@@ -241,7 +246,7 @@ export class AIService {
 
       messages.push({
         role: "user",
-        content: buildMainTurnUserMessage(initialGoal, lastUserMsg, summary, leafNodeLabels)
+        content: buildMainTurnUserMessage(initialGoal, lastUserMsg, summary, leafNodeLabels, existingLabels)
       });
     }
 
