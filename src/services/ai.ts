@@ -26,17 +26,19 @@ const buildFirstTurnUserMessage = (goal: string): string => {
 DO THIS NOW:
 1. Think of 3-4 important aspects of this specific goal
 2. Create a mind map with these topics as nodes
-3. Ask ONE question about which aspect they want to focus on first
+3. Write a question asking which aspect they want to focus on
 
-OUTPUT THIS JSON (fill in the <> parts with REAL content):
+IMPORTANT: The "assistantResponse" field MUST contain your question as a string, not null!
+
+OUTPUT JSON:
 {
-  "assistantResponse": "<your question about their priority>",
+  "assistantResponse": "Which of these aspects would you like to focus on first: [aspect1], [aspect2], or [aspect3]?",
   "updatedMindMap": {
     "nodes": [
       {"id": "root", "label": "${goal.slice(0, 30)}", "description": "${goal}"},
-      {"id": "aspect-1", "label": "<first important aspect>", "description": "<why this matters>"},
-      {"id": "aspect-2", "label": "<second aspect>", "description": "<why this matters>"},
-      {"id": "aspect-3", "label": "<third aspect>", "description": "<why this matters>"}
+      {"id": "aspect-1", "label": "[first topic]", "description": "[why it matters]"},
+      {"id": "aspect-2", "label": "[second topic]", "description": "[why it matters]"},
+      {"id": "aspect-3", "label": "[third topic]", "description": "[why it matters]"}
     ],
     "edges": [
       {"source": "root", "target": "aspect-1"},
@@ -44,7 +46,7 @@ OUTPUT THIS JSON (fill in the <> parts with REAL content):
       {"source": "root", "target": "aspect-3"}
     ]
   },
-  "suggestions": ["<option about aspect 1>", "<option about aspect 2>", "<option about aspect 3>", "<other option>"]
+  "suggestions": ["[topic 1]", "[topic 2]", "[topic 3]", "Something else"]
 }`;
 };
 

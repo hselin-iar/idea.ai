@@ -67,9 +67,9 @@ export default function ChatPanel() {
         initChat();
     }, [goal, messages.length]);
 
-    // V34: Process AI response with debug logging
+    // V39: Process AI response with null handling
     const processAIResponse = (response: string) => {
-        console.log("V34 DEBUG: Raw AI response:", response);
+        console.log("V39 DEBUG: Raw AI response:", response);
 
         let cleanResponse = "";
         let suggestions: string[] = [];
@@ -80,31 +80,43 @@ export default function ChatPanel() {
             const jsonMatch = response.match(/\{[\s\S]*\}/);
             if (jsonMatch) {
                 parsedData = JSON.parse(jsonMatch[0]);
-                console.log("V34 DEBUG: Parsed JSON:", parsedData);
+                console.log("V39 DEBUG: Parsed JSON:", parsedData);
             }
         } catch (e) {
-            console.warn("V34 DEBUG: JSON Parse Failed:", e);
+            console.warn("V39 DEBUG: JSON Parse Failed:", e);
         }
 
         // 2. Apply the schema
         if (parsedData) {
+            // V39: Handle null assistantResponse - generate default question
             cleanResponse = parsedData.assistantResponse || parsedData.message || "";
+
+            // V39: If assistantResponse is null/empty, create a default question
+            if (!cleanResponse && parsedData.updatedMindMap?.nodes?.length > 1) {
+                const firstTopic = parsedData.updatedMindMap.nodes[1]?.label || "this project";
+                cleanResponse = `What aspect of ${firstTopic} would you like to explore first?`;
+                console.log("V39 DEBUG: Generated default question:", cleanResponse);
+            }
+
             suggestions = parsedData.suggestions || parsedData.options || [];
 
-            // V34: Debug mind map update
+            // V39: Clean up suggestions that might have formatting issues
+            suggestions = suggestions
+                .filter((s: string) => s && typeof s === 'string')
+                .map((s: string) => s.replace(/[\[\]]/g, '').trim())
+                .filter((s: string) => s.length > 0 && s.length < 100);
+
+            // Update mind map
             if (parsedData.updatedMindMap) {
-                console.log("V34 DEBUG: updatedMindMap found:", parsedData.updatedMindMap);
-                console.log("V34 DEBUG: Nodes to add:", parsedData.updatedMindMap.nodes);
+                console.log("V39 DEBUG: updatedMindMap found:", parsedData.updatedMindMap);
                 setMindMapFromJSON(parsedData.updatedMindMap);
-            } else {
-                console.warn("V34 DEBUG: NO updatedMindMap in response!");
             }
         }
 
-        // 3. Fallback
+        // 3. Final fallback
         if (!cleanResponse) {
-            console.error("V34 DEBUG: Failed to parse - no cleanResponse");
-            cleanResponse = response.length < 200 ? response : "⚠️ AI Error. Check console.";
+            console.warn("V39 DEBUG: No cleanResponse, using fallback");
+            cleanResponse = "What would you like to focus on first?";
         }
 
         addMessage('assistant', cleanResponse, suggestions);
