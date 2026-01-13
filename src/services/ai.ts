@@ -3,42 +3,43 @@ import { CreateMLCEngine, MLCEngine, InitProgressCallback } from "@mlc-ai/web-ll
 const SELECTED_MODEL = "Qwen2.5-1.5B-Instruct-q4f32_1-MLC";
 
 // ============================================================================
-// V39: DEEP FIX - System messages, step-by-step, no template copying
+// V40: NO BRACKETS - All placeholders removed, explicit values only
 // ============================================================================
 
 /**
  * System message that defines the AI's core behavior
  */
-const SYSTEM_MESSAGE = `You are a mind map planning assistant. Your ONLY job is to:
-1. Ask SHORT questions to understand the user's project
-2. Create mind map nodes based on their answers
-3. NEVER repeat questions
+const SYSTEM_MESSAGE = `You are a mind map planning assistant. Your job is to:
+1. Ask SHORT questions (1 sentence) to understand the user's project
+2. Create mind map nodes with REAL labels based on their goal
+3. NEVER use placeholder text like "topic 1" or "option 1"
 4. ALWAYS respond to what the user just said
 
-You output JSON only. Never output placeholder text like "Focus area 1" - always use REAL content based on the user's goal.`;
+You output JSON only. All text must be REAL content, never placeholders.`;
 
 /**
- * FIRST TURN: Simple instructions, no template to copy
+ * FIRST TURN: No template shown - just describe what to generate
  */
 const buildFirstTurnUserMessage = (goal: string): string => {
-  return `The user's goal is: "${goal}"
+  return `GOAL: "${goal}"
 
-DO THIS NOW:
-1. Think of 3-4 important aspects of this specific goal
-2. Create a mind map with these topics as nodes
-3. Write a question asking which aspect they want to focus on
+Generate a mind map with 3 starter topics for this goal.
 
-IMPORTANT: The "assistantResponse" field MUST contain your question as a string, not null!
+Your JSON must have:
+- assistantResponse: A question asking which topic to focus on (mention the actual topics)
+- updatedMindMap.nodes: Array with root node + 3 topic nodes with REAL labels and descriptions
+- updatedMindMap.edges: Connect each topic to root
+- suggestions: 3-4 clickable options matching your topics
 
-OUTPUT JSON:
+Example for "build a mobile app":
 {
-  "assistantResponse": "Which of these aspects would you like to focus on first: [aspect1], [aspect2], or [aspect3]?",
+  "assistantResponse": "Would you like to focus on the user interface design, backend development, or app store publishing first?",
   "updatedMindMap": {
     "nodes": [
-      {"id": "root", "label": "${goal.slice(0, 30)}", "description": "${goal}"},
-      {"id": "aspect-1", "label": "[first topic]", "description": "[why it matters]"},
-      {"id": "aspect-2", "label": "[second topic]", "description": "[why it matters]"},
-      {"id": "aspect-3", "label": "[third topic]", "description": "[why it matters]"}
+      {"id": "root", "label": "Build Mobile App", "description": "Creating a mobile application"},
+      {"id": "aspect-1", "label": "UI Design", "description": "User interface and user experience design"},
+      {"id": "aspect-2", "label": "Backend Development", "description": "Server-side logic and database"},
+      {"id": "aspect-3", "label": "App Store Publishing", "description": "Submitting to app stores"}
     ],
     "edges": [
       {"source": "root", "target": "aspect-1"},
@@ -46,51 +47,42 @@ OUTPUT JSON:
       {"source": "root", "target": "aspect-3"}
     ]
   },
-  "suggestions": ["[topic 1]", "[topic 2]", "[topic 3]", "Something else"]
-}`;
+  "suggestions": ["UI Design", "Backend Development", "App Store Publishing", "Something else"]
+}
+
+Now generate for: "${goal}"`;
 };
 
 /**
- * SUBSEQUENT TURNS: Pre-generate node ID, explicit topic extraction
+ * SUBSEQUENT TURNS: Pre-fill node ID AND edge source
  */
 const buildMainTurnUserMessage = (
   goal: string,
   lastUserMessage: string,
   conversationSummary: string,
   currentNodes: string,
-  newNodeId: string
+  newNodeId: string,
+  defaultParentId: string
 ): string => {
-  // Extract a short topic from user message (first 30 chars or up to first punctuation)
-  const shortTopic = lastUserMessage.slice(0, 40).split(/[.,!?]/)[0].trim();
-
   return `USER SAID: "${lastUserMessage}"
 
-CREATE THIS NODE:
-- id: "${newNodeId}"  
-- label: A short name for "${shortTopic}"
-- description: What the user wants to know about this
+Add a node for "${lastUserMessage}" to the mind map.
 
-CONNECT IT TO: Pick the most relevant node from this list:
-${currentNodes}
+NODE TO CREATE:
+- id: "${newNodeId}"
+- label: Short name based on "${lastUserMessage}"
+- description: Brief explanation
 
-ASK A SHORT QUESTION (1 sentence max) about "${shortTopic}"
+CONNECT TO: "${defaultParentId}" (or pick better match from: ${currentNodes})
 
-CONVERSATION CONTEXT:
+QUESTION: Ask 1 short question about "${lastUserMessage}"
+
+SUGGESTIONS: 3 options related to "${lastUserMessage}"
+
+Previous conversation:
 ${conversationSummary}
 
-OUTPUT JSON:
-{
-  "assistantResponse": "[Your 1-sentence question about ${shortTopic}]",
-  "updatedMindMap": {
-    "nodes": [
-      {"id": "${newNodeId}", "label": "[Short name for ${shortTopic}]", "description": "[What user wants]"}
-    ],
-    "edges": [
-      {"source": "[pick from node list above]", "target": "${newNodeId}"}
-    ]
-  },
-  "suggestions": ["[option 1]", "[option 2]", "[option 3]"]
-}`;
+Output JSON with assistantResponse, updatedMindMap (nodes, edges), and suggestions.`;
 };
 
 // ============================================================================
@@ -153,25 +145,28 @@ export class AIService {
         .map(m => `${m.role}: ${m.content}`)
         .join('\n');
 
-      // Extract node labels for reference
+      // V40: Extract node info and find default parent
       let nodesList = "root";
+      let defaultParentId = "root";
       try {
         const mapData = JSON.parse(currentMindMapJSON);
         if (mapData.nodes && Array.isArray(mapData.nodes)) {
           nodesList = mapData.nodes
-            .map((n: any) => `- ${n.id}: "${n.label}"`)
-            .join('\n');
+            .map((n: any) => `${n.id}`)
+            .join(', ');
+          // Use first node (root) as default parent
+          defaultParentId = mapData.nodes[0]?.id || "root";
         }
       } catch (e) {
         console.warn("Could not parse mind map");
       }
 
-      // V39.2: Pre-generate a unique node ID
+      // V40: Pre-generate a unique node ID
       const newNodeId = `node-${Date.now()}-user`;
 
       messages.push({
         role: "user",
-        content: buildMainTurnUserMessage(initialGoal, lastUserMsg, summary, nodesList, newNodeId)
+        content: buildMainTurnUserMessage(initialGoal, lastUserMsg, summary, nodesList, newNodeId, defaultParentId)
       });
     }
 
