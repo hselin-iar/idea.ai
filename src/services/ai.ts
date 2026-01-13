@@ -51,44 +51,45 @@ OUTPUT JSON:
 };
 
 /**
- * SUBSEQUENT TURNS: User input at TOP, explicit response instruction
+ * SUBSEQUENT TURNS: Pre-generate node ID, explicit topic extraction
  */
 const buildMainTurnUserMessage = (
   goal: string,
   lastUserMessage: string,
   conversationSummary: string,
-  currentNodes: string
+  currentNodes: string,
+  newNodeId: string
 ): string => {
-  return `=== USER JUST SAID THIS (YOU MUST RESPOND TO THIS) ===
-"${lastUserMessage}"
+  // Extract a short topic from user message (first 30 chars or up to first punctuation)
+  const shortTopic = lastUserMessage.slice(0, 40).split(/[.,!?]/)[0].trim();
 
-=== PROJECT GOAL ===
-${goal}
+  return `USER SAID: "${lastUserMessage}"
 
-=== CONVERSATION SO FAR ===
-${conversationSummary}
+CREATE THIS NODE:
+- id: "${newNodeId}"  
+- label: A short name for "${shortTopic}"
+- description: What the user wants to know about this
 
-=== CURRENT MIND MAP NODES ===
+CONNECT IT TO: Pick the most relevant node from this list:
 ${currentNodes}
 
-DO THIS NOW:
-1. READ what the user just said above
-2. Create a NEW node about "${lastUserMessage}" 
-3. Connect it to the most relevant existing node
-4. Ask a DIFFERENT follow-up question about "${lastUserMessage}"
+ASK A SHORT QUESTION (1 sentence max) about "${shortTopic}"
 
-OUTPUT THIS JSON:
+CONVERSATION CONTEXT:
+${conversationSummary}
+
+OUTPUT JSON:
 {
-  "assistantResponse": "<your NEW question about ${lastUserMessage}>",
+  "assistantResponse": "[Your 1-sentence question about ${shortTopic}]",
   "updatedMindMap": {
     "nodes": [
-      {"id": "new-<timestamp>", "label": "<topic from user message>", "description": "<details about what user said>"}
+      {"id": "${newNodeId}", "label": "[Short name for ${shortTopic}]", "description": "[What user wants]"}
     ],
     "edges": [
-      {"source": "<id of related existing node>", "target": "new-<timestamp>"}
+      {"source": "[pick from node list above]", "target": "${newNodeId}"}
     ]
   },
-  "suggestions": ["<specific option 1>", "<specific option 2>", "<specific option 3>"]
+  "suggestions": ["[option 1]", "[option 2]", "[option 3]"]
 }`;
 };
 
@@ -165,9 +166,12 @@ export class AIService {
         console.warn("Could not parse mind map");
       }
 
+      // V39.2: Pre-generate a unique node ID
+      const newNodeId = `node-${Date.now()}-user`;
+
       messages.push({
         role: "user",
-        content: buildMainTurnUserMessage(initialGoal, lastUserMsg, summary, nodesList)
+        content: buildMainTurnUserMessage(initialGoal, lastUserMsg, summary, nodesList, newNodeId)
       });
     }
 
