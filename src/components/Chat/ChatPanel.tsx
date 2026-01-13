@@ -69,11 +69,10 @@ export default function ChatPanel() {
         initChat();
     }, [goal, messages.length]);
 
-    // V42: Process AI response using parser
+    // V44: Process AI response using parser with robust fallback
     const processAIResponse = (response: string, isFirstTurn: boolean = false) => {
-        console.log("V42 DEBUG: Raw AI response:", response);
+        console.log("V44 DEBUG: Raw AI response:", response);
 
-        // V42: Try to parse as simple text format first
         const newNodeId = `node-${Date.now()}-user`;
         const parentId = nodes.length > 0 ? nodes[0].id : 'root';
         const lastUserMsg = lastUserMessageRef.current;
@@ -85,7 +84,7 @@ export default function ChatPanel() {
             const jsonMatch = response.match(/\{[\s\S]*\}/);
             if (jsonMatch) {
                 parsedData = JSON.parse(jsonMatch[0]);
-                console.log("V42 DEBUG: Parsed as JSON:", parsedData);
+                console.log("V44 DEBUG: Parsed as JSON:", parsedData);
             }
         } catch (e) {
             // Not JSON, use text parser
@@ -93,9 +92,9 @@ export default function ChatPanel() {
 
         // If no JSON or JSON failed, use text parser
         if (!parsedData || !parsedData.assistantResponse) {
-            console.log("V42 DEBUG: Using text parser");
+            console.log("V44 DEBUG: Using text parser");
             parsedData = parseAIResponse(response, goal, nodes, newNodeId, parentId, lastUserMsg);
-            console.log("V42 DEBUG: Parsed result:", parsedData);
+            console.log("V44 DEBUG: Parsed result:", parsedData);
         }
 
         let cleanResponse = parsedData.assistantResponse || "What would you like to explore?";
@@ -107,10 +106,18 @@ export default function ChatPanel() {
             .map((s: string) => s.replace(/[\[\]]/g, '').trim())
             .filter((s: string) => s.length > 0 && s.length < 100);
 
-        // Update mind map
-        if (parsedData.updatedMindMap) {
-            console.log("V42 DEBUG: Updating mind map:", parsedData.updatedMindMap);
+        // V44: Always update mind map - create fallback node if parsing failed
+        if (parsedData.updatedMindMap && parsedData.updatedMindMap.nodes?.length > 0) {
+            console.log("V44 DEBUG: Updating mind map:", parsedData.updatedMindMap);
             setMindMapFromJSON(parsedData.updatedMindMap);
+        } else if (!isFirstTurn && lastUserMsg) {
+            // V44: Fallback - create node from user message anyway
+            console.log("V44 DEBUG: Fallback - creating node from user message");
+            const fallbackData = {
+                nodes: [{ id: newNodeId, label: lastUserMsg.slice(0, 30), description: lastUserMsg }],
+                edges: [{ source: parentId, target: newNodeId }]
+            };
+            setMindMapFromJSON(fallbackData);
         }
 
         addMessage('assistant', cleanResponse, suggestions);

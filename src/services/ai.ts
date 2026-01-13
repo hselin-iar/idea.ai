@@ -217,13 +217,13 @@ export class AIService {
         content: buildFirstTurnUserMessage(initialGoal)
       });
     } else {
-      // V43: Get the last user message
+      // V44: Get the last user message
       const lastUserMsg = chatHistory[chatHistory.length - 1]?.content || "";
 
-      // Build conversation summary (excluding last message)
-      const summary = chatHistory
-        .slice(0, -1)
-        .map(m => `${m.role}: ${m.content}`)
+      // V44: Limit conversation summary to last 4 messages (context window limit)
+      const recentHistory = chatHistory.slice(-5, -1); // Last 4, excluding current
+      const summary = recentHistory
+        .map(m => `${m.role}: ${m.content.slice(0, 100)}`) // Truncate long messages
         .join('\n');
 
       // V43: Find leaf nodes (outermost - nodes that are not sources of any edge)
