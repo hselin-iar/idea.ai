@@ -3,93 +3,93 @@ import { CreateMLCEngine, MLCEngine, InitProgressCallback } from "@mlc-ai/web-ll
 const SELECTED_MODEL = "Qwen2.5-1.5B-Instruct-q4f32_1-MLC";
 
 // ============================================================================
-// V37: FIXED PROMPTS - No hardcoded IDs, proper context tracking
+// V38: COMPREHENSIVE FIX - Connected nodes, rich descriptions, no repetition
 // ============================================================================
 
 /**
- * FIRST TURN: Create initial structure and ask opening question
- * Key fix: Use timestamp-based IDs, not hardcoded "who/what/how"
+ * FIRST TURN: Create initial structure with rich descriptions
  */
 const buildFirstQuestionPrompt = (initialGoal: string): string => {
-  const timestamp = Date.now();
-  return `You are an AI assistant helping to plan a project. The user's goal is: "${initialGoal}"
+  return `You are a project planning AI. The user wants to: "${initialGoal}"
 
-Your task:
-1. Create an initial mind map structure with 3-4 starter topics related to this goal
-2. Ask ONE focused question to understand more about their project
+Create an initial mind map and ask ONE opening question.
 
-CRITICAL RULES:
-- Use UNIQUE node IDs like "node-${timestamp}-1", "node-${timestamp}-2", etc.
-- NEVER use generic IDs like "who", "what", "how", "root"
-- The root node ID must be exactly "root"
-- Create relevant starter topics based on the SPECIFIC goal, not generic categories
+RULES:
+1. Create 3-4 SPECIFIC starter topics (not generic "Who/What/How")
+2. Each node MUST have a DETAILED description (2-3 sentences minimum)
+3. Your question should help understand their priorities
 
-OUTPUT FORMAT (JSON only):
+RESPOND WITH ONLY THIS JSON:
 {
-  "assistantResponse": "Your opening question here",
+  "assistantResponse": "Ask about their top priority or main focus area",
   "updatedMindMap": {
     "nodes": [
-      {"id": "root", "label": "${initialGoal.slice(0, 30)}", "description": "${initialGoal}"},
-      {"id": "node-${timestamp}-1", "label": "Relevant Topic 1", "description": "Brief description"},
-      {"id": "node-${timestamp}-2", "label": "Relevant Topic 2", "description": "Brief description"},
-      {"id": "node-${timestamp}-3", "label": "Relevant Topic 3", "description": "Brief description"}
+      {"id": "root", "label": "${initialGoal.slice(0, 25)}...", "description": "${initialGoal}"},
+      {"id": "topic-1", "label": "Specific Topic", "description": "Detailed explanation of this topic and why it matters for the project"},
+      {"id": "topic-2", "label": "Another Topic", "description": "Detailed explanation of this topic and its importance"},
+      {"id": "topic-3", "label": "Third Topic", "description": "Detailed explanation and context"}
     ],
     "edges": [
-      {"source": "root", "target": "node-${timestamp}-1"},
-      {"source": "root", "target": "node-${timestamp}-2"},
-      {"source": "root", "target": "node-${timestamp}-3"}
+      {"source": "root", "target": "topic-1"},
+      {"source": "root", "target": "topic-2"},
+      {"source": "root", "target": "topic-3"}
     ]
   },
-  "suggestions": ["Option 1", "Option 2", "Option 3", "Option 4", "Option 5"]
+  "suggestions": ["Focus area 1", "Focus area 2", "Focus area 3", "Something else"]
 }`;
 };
 
 /**
- * SUBSEQUENT TURNS: Expand based on user's response
- * Key fixes: 
- * - Clear instruction to NOT repeat questions
- * - Create only NEW nodes for new information
- * - Track what's already in the map
+ * MAIN TURNS: Expand the SINGLE mind map with connected nodes
  */
-const buildMainPrompt = (initialGoal: string, chatHistory: string, currentMindMap: string): string => {
-  const timestamp = Date.now();
-  return `You are an AI assistant helping plan: "${initialGoal}"
+const buildMainPrompt = (
+  initialGoal: string,
+  fullChatHistory: string,
+  currentMindMap: string,
+  existingNodesList: string
+): string => {
+  return `You are a project planning AI helping with: "${initialGoal}"
 
-CONVERSATION SO FAR:
-${chatHistory}
+=== FULL CONVERSATION (DO NOT ASK THE SAME QUESTIONS AGAIN) ===
+${fullChatHistory}
 
-CURRENT MIND MAP STATE:
+=== CURRENT MIND MAP (USE THESE EXACT IDs TO CONNECT NEW NODES) ===
 ${currentMindMap}
 
-YOUR TASK:
-1. Read the user's LAST message carefully
-2. Create a NEW node for what they mentioned (if it's new information)
-3. Ask a NEW follow-up question that DIGS DEEPER into what they just said
-4. Provide relevant quick-reply suggestions
+=== EXISTING NODE IDs YOU CAN CONNECT TO ===
+${existingNodesList}
 
-CRITICAL RULES:
-- NEVER repeat a question you already asked (check conversation history)
-- NEVER create nodes that already exist in the mind map
-- Use UNIQUE IDs like "node-${timestamp}-1" for any new nodes
-- Only add nodes for genuinely NEW information from the user
-- Your question must be about what the user JUST SAID, not about something else
-- If the user gave a short answer like "Technology", expand on THAT topic specifically
+=== YOUR TASK ===
+1. Read the user's LAST message
+2. Add NEW nodes based on what they said
+3. Connect new nodes to the MOST RELEVANT existing node ID from the list above
+4. Ask a DIFFERENT follow-up question (check conversation above - do NOT repeat!)
+5. Update descriptions of existing nodes if the user gave new context
 
-OUTPUT FORMAT (JSON only):
+=== CRITICAL RULES ===
+- NEVER repeat a question from the conversation above
+- EVERY new node MUST connect to an existing node ID from the list
+- Descriptions must be DETAILED (2+ sentences)
+- If user answered about "Technology", ask about SPECIFIC tech choices
+- If user answered about "Users", ask about SPECIFIC user needs
+- Always progress the conversation forward
+
+=== REQUIRED JSON OUTPUT ===
 {
-  "assistantResponse": "Your NEW question about what user just said",
+  "assistantResponse": "Your NEW question that digs deeper into what user just said",
   "updatedMindMap": {
     "nodes": [
-      {"id": "node-${timestamp}-1", "label": "Topic from user's message", "description": "Details about this"}
+      {"id": "new-node-1", "label": "Topic from user", "description": "Detailed description based on what user said, at least 2 sentences explaining this aspect"}
     ],
     "edges": [
-      {"source": "parent-node-id", "target": "node-${timestamp}-1"}
+      {"source": "EXISTING_NODE_ID_FROM_LIST", "target": "new-node-1"}
+    ],
+    "nodeUpdates": [
+      {"id": "existing-node-id", "description": "Updated description with new context from user"}
     ]
   },
-  "suggestions": ["Sub-topic 1", "Sub-topic 2", "Sub-topic 3", "Sub-topic 4"]
-}
-
-IMPORTANT: If there's nothing new to add to the map, return empty nodes/edges arrays.`;
+  "suggestions": ["Specific option 1", "Specific option 2", "Specific option 3"]
+}`;
 };
 
 
@@ -138,17 +138,31 @@ export class AIService {
     if (isFirstTurn) {
       prompt = buildFirstQuestionPrompt(initialGoal);
     } else {
+      // V38: Use FULL history for proper context tracking
       const historyString = chatHistory
-        .slice(-4) // Only last 4 messages for speed
-        .map(m => `${m.role}: ${m.content}`)
+        .map(m => `${m.role.toUpperCase()}: ${m.content}`)
         .join('\n');
-      prompt = buildMainPrompt(initialGoal, historyString, currentMindMapJSON);
+
+      // V38: Extract existing node IDs for the AI to connect to
+      let existingNodesList = "root";
+      try {
+        const mapData = JSON.parse(currentMindMapJSON);
+        if (mapData.nodes && Array.isArray(mapData.nodes)) {
+          existingNodesList = mapData.nodes
+            .map((n: any) => `- ${n.id}: "${n.label}"`)
+            .join('\n');
+        }
+      } catch (e) {
+        console.warn("Could not parse mind map for node list");
+      }
+
+      prompt = buildMainPrompt(initialGoal, historyString, currentMindMapJSON, existingNodesList);
     }
 
     const reply = await engine.chat.completions.create({
       messages: [{ role: "user", content: prompt }] as any,
-      temperature: 0.3, // Lower for predictability
-      max_tokens: 400, // REDUCED for speed
+      temperature: 0.3,
+      max_tokens: 600, // Increased for richer descriptions
       response_format: { type: "json_object" },
     });
 

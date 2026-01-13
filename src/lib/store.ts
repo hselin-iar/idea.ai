@@ -36,8 +36,8 @@ interface AppState {
     duplicateNode: (id: string) => void;
     setNodes: (nodes: Node[]) => void;
     setEdges: (edges: Edge[]) => void;
-    // V23: Full state replacement from AI
-    setMindMapFromJSON: (mapData: { nodes: any[], edges: any[] }) => void;
+    // V38: Full state replacement from AI with optional node updates
+    setMindMapFromJSON: (mapData: { nodes: any[], edges: any[], nodeUpdates?: any[] }) => void;
     getMindMapAsJSON: () => string;
 
     // Chat State
@@ -157,10 +157,11 @@ export const useStore = create<AppState>((set, get) => ({
     setNodes: (nodes) => set({ nodes }),
     setEdges: (edges) => set({ edges }),
 
-    // V37: IMPROVED NODE HANDLING - Detects duplicates by LABEL
-    // - Checks if a node with the same label already exists
-    // - Updates existing nodes instead of creating duplicates
-    // - Only creates truly new nodes
+    // V38: COMPREHENSIVE NODE HANDLING
+    // - Detects duplicates by label
+    // - Handles nodeUpdates for enriching existing descriptions
+    // - Auto-connects orphaned nodes to root
+    // - Always updates descriptions when AI provides new context
     setMindMapFromJSON: (mapData) => {
         if (!mapData || !mapData.nodes) return;
 
@@ -177,13 +178,29 @@ export const useStore = create<AppState>((set, get) => ({
         const newNodes: Node[] = [];
         const idMapping: Map<string, string> = new Map();
 
+        // V38: Process nodeUpdates FIRST to update existing descriptions
+        if (mapData.nodeUpdates && Array.isArray(mapData.nodeUpdates)) {
+            mapData.nodeUpdates.forEach((update: any) => {
+                const existingNode = existingNodeById.get(update.id);
+                if (existingNode && update.description) {
+                    updatedNodes.push({
+                        ...existingNode,
+                        data: {
+                            ...existingNode.data,
+                            description: update.description,
+                        }
+                    });
+                }
+            });
+        }
+
         mapData.nodes.forEach((n: any, index: number) => {
             const normalizedLabel = String(n.label || '').toLowerCase().trim();
 
             // Skip nodes with empty labels
             if (!normalizedLabel) return;
 
-            // Check if node already exists (by ID for root, by label for others)
+            // Check if node already exists
             const existingById = existingNodeById.get(n.id);
             const existingByLabel = existingNodeByLabel.get(normalizedLabel);
 
@@ -199,18 +216,22 @@ export const useStore = create<AppState>((set, get) => ({
                 });
                 idMapping.set(n.id, n.id);
             } else if (existingByLabel) {
-                // Node with same label exists: map to existing, optionally update description
+                // Node with same label exists: map to existing ID
                 idMapping.set(n.id, existingByLabel.id);
 
-                // Update description if AI provided a better one
-                if (n.description && !existingByLabel.data.description) {
-                    updatedNodes.push({
-                        ...existingByLabel,
-                        data: {
-                            ...existingByLabel.data,
-                            description: n.description,
-                        }
-                    });
+                // V38: ALWAYS update description if AI provided one
+                if (n.description && n.description !== existingByLabel.data.description) {
+                    // Check if we haven't already updated this node
+                    const alreadyUpdated = updatedNodes.some(un => un.id === existingByLabel.id);
+                    if (!alreadyUpdated) {
+                        updatedNodes.push({
+                            ...existingByLabel,
+                            data: {
+                                ...existingByLabel.data,
+                                description: n.description,
+                            }
+                        });
+                    }
                 }
             } else {
                 // Genuinely new node: create with unique ID
@@ -243,12 +264,25 @@ export const useStore = create<AppState>((set, get) => ({
         const mergedNodes = [...unchangedNodes, ...updatedNodes, ...newNodes];
         const allNodeIds = new Set(mergedNodes.map(n => n.id));
 
-        // Process edges with ID remapping
+        // V38: Process edges with ID remapping AND auto-connect orphans
         const existingEdgeKeys = new Set(currentEdges.map(e => `${e.source}-${e.target}`));
+        const newNodesNeedingEdges = new Set(newNodes.map(n => n.id));
+
         const newEdgesFromAI: Edge[] = (mapData.edges || [])
             .map((e: any, index: number) => {
-                const sourceId = idMapping.get(e.source) || e.source;
+                let sourceId = idMapping.get(e.source) || e.source;
                 const targetId = idMapping.get(e.target) || e.target;
+
+                // V38: If source doesn't exist, fall back to root
+                if (!allNodeIds.has(sourceId)) {
+                    // Find root node
+                    const rootNode = mergedNodes.find(n => n.id.includes('root') || mergedNodes.indexOf(n) === 0);
+                    sourceId = rootNode?.id || 'root';
+                }
+
+                // Mark this new node as having an edge
+                newNodesNeedingEdges.delete(targetId);
+
                 return { source: sourceId, target: targetId, index };
             })
             .filter((e: any) => {
@@ -262,9 +296,25 @@ export const useStore = create<AppState>((set, get) => ({
                 target: e.target,
             }));
 
-        const mergedEdges = [...currentEdges, ...newEdgesFromAI];
+        // V38: Auto-connect any orphaned new nodes to root
+        const rootNode = mergedNodes.find(n => n.id.includes('root') || mergedNodes.indexOf(n) === 0);
+        const orphanEdges: Edge[] = [];
+        if (rootNode) {
+            newNodesNeedingEdges.forEach(orphanId => {
+                const key = `${rootNode.id}-${orphanId}`;
+                if (!existingEdgeKeys.has(key)) {
+                    orphanEdges.push({
+                        id: `edge-orphan-${Date.now()}-${orphanId}`,
+                        source: rootNode.id,
+                        target: orphanId,
+                    });
+                }
+            });
+        }
 
-        console.log(`V37: Added ${newNodes.length} new nodes, ${newEdgesFromAI.length} new edges. Skipped duplicates by label.`);
+        const mergedEdges = [...currentEdges, ...newEdgesFromAI, ...orphanEdges];
+
+        console.log(`V38: Added ${newNodes.length} new nodes, ${newEdgesFromAI.length} edges, ${orphanEdges.length} orphan edges. Updated ${updatedNodes.length} descriptions.`);
         set({ nodes: mergedNodes, edges: mergedEdges });
     },
 
