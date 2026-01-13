@@ -3,68 +3,93 @@ import { CreateMLCEngine, MLCEngine, InitProgressCallback } from "@mlc-ai/web-ll
 const SELECTED_MODEL = "Qwen2.5-1.5B-Instruct-q4f32_1-MLC";
 
 // ============================================================================
-// V33: PATTERN-BASED EXPANSION (Generalized Fix)
+// V37: FIXED PROMPTS - No hardcoded IDs, proper context tracking
 // ============================================================================
 
 /**
- * FIRST TURN: Create structure and ask to expand on the goal
+ * FIRST TURN: Create initial structure and ask opening question
+ * Key fix: Use timestamp-based IDs, not hardcoded "who/what/how"
  */
 const buildFirstQuestionPrompt = (initialGoal: string): string => {
-  return `Goal: "${initialGoal}"
+  const timestamp = Date.now();
+  return `You are an AI assistant helping to plan a project. The user's goal is: "${initialGoal}"
 
-You are helping plan this project. Create a mind map structure and ask ONE question to understand more.
+Your task:
+1. Create an initial mind map structure with 3-4 starter topics related to this goal
+2. Ask ONE focused question to understand more about their project
 
-OUTPUT FORMAT:
+CRITICAL RULES:
+- Use UNIQUE node IDs like "node-${timestamp}-1", "node-${timestamp}-2", etc.
+- NEVER use generic IDs like "who", "what", "how", "root"
+- The root node ID must be exactly "root"
+- Create relevant starter topics based on the SPECIFIC goal, not generic categories
+
+OUTPUT FORMAT (JSON only):
 {
-  "assistantResponse": "Ask what specific aspect they want to focus on first",
+  "assistantResponse": "Your opening question here",
   "updatedMindMap": {
     "nodes": [
       {"id": "root", "label": "${initialGoal.slice(0, 30)}", "description": "${initialGoal}"},
-      {"id": "who", "label": "Who", "description": "Target users"},
-      {"id": "what", "label": "What", "description": "Features and scope"},
-      {"id": "how", "label": "How", "description": "Implementation"}
+      {"id": "node-${timestamp}-1", "label": "Relevant Topic 1", "description": "Brief description"},
+      {"id": "node-${timestamp}-2", "label": "Relevant Topic 2", "description": "Brief description"},
+      {"id": "node-${timestamp}-3", "label": "Relevant Topic 3", "description": "Brief description"}
     ],
     "edges": [
-      {"source": "root", "target": "who"},
-      {"source": "root", "target": "what"},
-      {"source": "root", "target": "how"}
+      {"source": "root", "target": "node-${timestamp}-1"},
+      {"source": "root", "target": "node-${timestamp}-2"},
+      {"source": "root", "target": "node-${timestamp}-3"}
     ]
   },
-  "suggestions": ["Who uses it", "Main features", "Technology", "Timeline", "Budget"]
+  "suggestions": ["Option 1", "Option 2", "Option 3", "Option 4", "Option 5"]
 }`;
 };
 
 /**
- * MAIN TURNS: Expand on whatever the user mentioned
+ * SUBSEQUENT TURNS: Expand based on user's response
+ * Key fixes: 
+ * - Clear instruction to NOT repeat questions
+ * - Create only NEW nodes for new information
+ * - Track what's already in the map
  */
 const buildMainPrompt = (initialGoal: string, chatHistory: string, currentMindMap: string): string => {
-  return `Goal: "${initialGoal}"
+  const timestamp = Date.now();
+  return `You are an AI assistant helping plan: "${initialGoal}"
 
-CHAT:
+CONVERSATION SO FAR:
 ${chatHistory}
 
-MAP: ${currentMindMap}
+CURRENT MIND MAP STATE:
+${currentMindMap}
 
-PATTERN: When the user mentions something, EXPAND on it.
-- If they mention a TOPIC, ask about its DETAILS or SUB-PARTS
-- If they give a DETAIL, ask for MORE SPECIFICS or NEXT STEPS
-- Always dig DEEPER into what they said
+YOUR TASK:
+1. Read the user's LAST message carefully
+2. Create a NEW node for what they mentioned (if it's new information)
+3. Ask a NEW follow-up question that DIGS DEEPER into what they just said
+4. Provide relevant quick-reply suggestions
 
-The user just said something. Read their LAST message.
-1. Create a node for what they mentioned
-2. Ask a question to break it down further
+CRITICAL RULES:
+- NEVER repeat a question you already asked (check conversation history)
+- NEVER create nodes that already exist in the mind map
+- Use UNIQUE IDs like "node-${timestamp}-1" for any new nodes
+- Only add nodes for genuinely NEW information from the user
+- Your question must be about what the user JUST SAID, not about something else
+- If the user gave a short answer like "Technology", expand on THAT topic specifically
 
-JSON:
+OUTPUT FORMAT (JSON only):
 {
-  "assistantResponse": "Question that expands on what user said",
+  "assistantResponse": "Your NEW question about what user just said",
   "updatedMindMap": {
-    "nodes": [{"id": "topic-id", "label": "Topic from user", "description": "Details"}],
-    "edges": [{"source": "parent-id", "target": "topic-id"}]
+    "nodes": [
+      {"id": "node-${timestamp}-1", "label": "Topic from user's message", "description": "Details about this"}
+    ],
+    "edges": [
+      {"source": "parent-node-id", "target": "node-${timestamp}-1"}
+    ]
   },
-  "suggestions": ["Sub-topic 1", "Sub-topic 2", "Sub-topic 3", "Sub-topic 4", "Sub-topic 5"]
+  "suggestions": ["Sub-topic 1", "Sub-topic 2", "Sub-topic 3", "Sub-topic 4"]
 }
 
-RULE: Your question must be about what the user JUST SAID. Expand their topic.`;
+IMPORTANT: If there's nothing new to add to the map, return empty nodes/edges arrays.`;
 };
 
 

@@ -157,37 +157,63 @@ export const useStore = create<AppState>((set, get) => ({
     setNodes: (nodes) => set({ nodes }),
     setEdges: (edges) => set({ edges }),
 
-    // V36: GENERALIZED NODE HANDLING
-    // - Only 'root' node is protected (can be updated)
-    // - ALL other nodes from AI create NEW nodes with unique IDs
-    // - This works for ANY project type
+    // V37: IMPROVED NODE HANDLING - Detects duplicates by LABEL
+    // - Checks if a node with the same label already exists
+    // - Updates existing nodes instead of creating duplicates
+    // - Only creates truly new nodes
     setMindMapFromJSON: (mapData) => {
         if (!mapData || !mapData.nodes) return;
 
         const currentNodes = get().nodes;
         const currentEdges = get().edges;
-        const existingNodeMap = new Map(currentNodes.map(n => [n.id, n]));
+
+        // Create lookup maps for existing nodes
+        const existingNodeById = new Map(currentNodes.map(n => [n.id, n]));
+        const existingNodeByLabel = new Map(
+            currentNodes.map(n => [String(n.data.label || '').toLowerCase().trim(), n])
+        );
 
         const updatedNodes: Node[] = [];
         const newNodes: Node[] = [];
         const idMapping: Map<string, string> = new Map();
 
         mapData.nodes.forEach((n: any, index: number) => {
-            const existingNode = existingNodeMap.get(n.id);
+            const normalizedLabel = String(n.label || '').toLowerCase().trim();
 
-            // V36: Only 'root' can be updated, everything else is NEW
-            if (n.id === 'root' && existingNode) {
+            // Skip nodes with empty labels
+            if (!normalizedLabel) return;
+
+            // Check if node already exists (by ID for root, by label for others)
+            const existingById = existingNodeById.get(n.id);
+            const existingByLabel = existingNodeByLabel.get(normalizedLabel);
+
+            if (n.id === 'root' && existingById) {
+                // Root node: update in place
                 updatedNodes.push({
-                    ...existingNode,
+                    ...existingById,
                     data: {
-                        ...existingNode.data,
-                        label: n.label || existingNode.data.label,
-                        description: n.description || existingNode.data.description,
+                        ...existingById.data,
+                        label: n.label || existingById.data.label,
+                        description: n.description || existingById.data.description,
                     }
                 });
                 idMapping.set(n.id, n.id);
-            } else if (n.label && n.label.trim()) {
-                // ALL other nodes become NEW with unique ID
+            } else if (existingByLabel) {
+                // Node with same label exists: map to existing, optionally update description
+                idMapping.set(n.id, existingByLabel.id);
+
+                // Update description if AI provided a better one
+                if (n.description && !existingByLabel.data.description) {
+                    updatedNodes.push({
+                        ...existingByLabel,
+                        data: {
+                            ...existingByLabel.data,
+                            description: n.description,
+                        }
+                    });
+                }
+            } else {
+                // Genuinely new node: create with unique ID
                 const newId = `node-${Date.now()}-${index}-${Math.random().toString(36).substr(2, 5)}`;
                 idMapping.set(n.id, newId);
 
@@ -201,6 +227,13 @@ export const useStore = create<AppState>((set, get) => ({
                     },
                     type: 'expandable',
                 });
+
+                // Add to label map to prevent duplicates within same response
+                existingNodeByLabel.set(normalizedLabel, {
+                    id: newId,
+                    position: { x: 0, y: 0 },
+                    data: { label: n.label, description: n.description }
+                } as Node);
             }
         });
 
@@ -220,6 +253,7 @@ export const useStore = create<AppState>((set, get) => ({
             })
             .filter((e: any) => {
                 const key = `${e.source}-${e.target}`;
+                // Only add edge if both nodes exist AND edge doesn't already exist
                 return allNodeIds.has(e.source) && allNodeIds.has(e.target) && !existingEdgeKeys.has(key);
             })
             .map((e: any) => ({
@@ -230,7 +264,7 @@ export const useStore = create<AppState>((set, get) => ({
 
         const mergedEdges = [...currentEdges, ...newEdgesFromAI];
 
-        console.log(`V36: Added ${newNodes.length} new nodes, ${newEdgesFromAI.length} new edges. (Root updated: ${updatedNodes.length > 0})`);
+        console.log(`V37: Added ${newNodes.length} new nodes, ${newEdgesFromAI.length} new edges. Skipped duplicates by label.`);
         set({ nodes: mergedNodes, edges: mergedEdges });
     },
 
