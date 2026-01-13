@@ -3,98 +3,95 @@ import { CreateMLCEngine, MLCEngine, InitProgressCallback } from "@mlc-ai/web-ll
 const SELECTED_MODEL = "Qwen2.5-1.5B-Instruct-q4f32_1-MLC";
 
 // ============================================================================
-// V38: COMPREHENSIVE FIX - Connected nodes, rich descriptions, no repetition
+// V39: DEEP FIX - System messages, step-by-step, no template copying
 // ============================================================================
 
 /**
- * FIRST TURN: Create initial structure with rich descriptions
+ * System message that defines the AI's core behavior
  */
-const buildFirstQuestionPrompt = (initialGoal: string): string => {
-  return `You are a project planning AI. The user wants to: "${initialGoal}"
+const SYSTEM_MESSAGE = `You are a mind map planning assistant. Your ONLY job is to:
+1. Ask SHORT questions to understand the user's project
+2. Create mind map nodes based on their answers
+3. NEVER repeat questions
+4. ALWAYS respond to what the user just said
 
-Create an initial mind map and ask ONE opening question.
+You output JSON only. Never output placeholder text like "Focus area 1" - always use REAL content based on the user's goal.`;
 
-RULES:
-1. Create 3-4 SPECIFIC starter topics (not generic "Who/What/How")
-2. Each node MUST have a DETAILED description (2-3 sentences minimum)
-3. Your question should help understand their priorities
+/**
+ * FIRST TURN: Simple instructions, no template to copy
+ */
+const buildFirstTurnUserMessage = (goal: string): string => {
+  return `The user's goal is: "${goal}"
 
-RESPOND WITH ONLY THIS JSON:
+DO THIS NOW:
+1. Think of 3-4 important aspects of this specific goal
+2. Create a mind map with these topics as nodes
+3. Ask ONE question about which aspect they want to focus on first
+
+OUTPUT THIS JSON (fill in the <> parts with REAL content):
 {
-  "assistantResponse": "Ask about their top priority or main focus area",
+  "assistantResponse": "<your question about their priority>",
   "updatedMindMap": {
     "nodes": [
-      {"id": "root", "label": "${initialGoal.slice(0, 25)}...", "description": "${initialGoal}"},
-      {"id": "topic-1", "label": "Specific Topic", "description": "Detailed explanation of this topic and why it matters for the project"},
-      {"id": "topic-2", "label": "Another Topic", "description": "Detailed explanation of this topic and its importance"},
-      {"id": "topic-3", "label": "Third Topic", "description": "Detailed explanation and context"}
+      {"id": "root", "label": "${goal.slice(0, 30)}", "description": "${goal}"},
+      {"id": "aspect-1", "label": "<first important aspect>", "description": "<why this matters>"},
+      {"id": "aspect-2", "label": "<second aspect>", "description": "<why this matters>"},
+      {"id": "aspect-3", "label": "<third aspect>", "description": "<why this matters>"}
     ],
     "edges": [
-      {"source": "root", "target": "topic-1"},
-      {"source": "root", "target": "topic-2"},
-      {"source": "root", "target": "topic-3"}
+      {"source": "root", "target": "aspect-1"},
+      {"source": "root", "target": "aspect-2"},
+      {"source": "root", "target": "aspect-3"}
     ]
   },
-  "suggestions": ["Focus area 1", "Focus area 2", "Focus area 3", "Something else"]
+  "suggestions": ["<option about aspect 1>", "<option about aspect 2>", "<option about aspect 3>", "<other option>"]
 }`;
 };
 
 /**
- * MAIN TURNS: Expand the SINGLE mind map with connected nodes
+ * SUBSEQUENT TURNS: User input at TOP, explicit response instruction
  */
-const buildMainPrompt = (
-  initialGoal: string,
-  fullChatHistory: string,
-  currentMindMap: string,
-  existingNodesList: string
+const buildMainTurnUserMessage = (
+  goal: string,
+  lastUserMessage: string,
+  conversationSummary: string,
+  currentNodes: string
 ): string => {
-  return `You are a project planning AI helping with: "${initialGoal}"
+  return `=== USER JUST SAID THIS (YOU MUST RESPOND TO THIS) ===
+"${lastUserMessage}"
 
-=== FULL CONVERSATION (DO NOT ASK THE SAME QUESTIONS AGAIN) ===
-${fullChatHistory}
+=== PROJECT GOAL ===
+${goal}
 
-=== CURRENT MIND MAP (USE THESE EXACT IDs TO CONNECT NEW NODES) ===
-${currentMindMap}
+=== CONVERSATION SO FAR ===
+${conversationSummary}
 
-=== EXISTING NODE IDs YOU CAN CONNECT TO ===
-${existingNodesList}
+=== CURRENT MIND MAP NODES ===
+${currentNodes}
 
-=== YOUR TASK ===
-1. Read the user's LAST message
-2. Add NEW nodes based on what they said
-3. Connect new nodes to the MOST RELEVANT existing node ID from the list above
-4. Ask a DIFFERENT follow-up question (check conversation above - do NOT repeat!)
-5. Update descriptions of existing nodes if the user gave new context
+DO THIS NOW:
+1. READ what the user just said above
+2. Create a NEW node about "${lastUserMessage}" 
+3. Connect it to the most relevant existing node
+4. Ask a DIFFERENT follow-up question about "${lastUserMessage}"
 
-=== CRITICAL RULES ===
-- NEVER repeat a question from the conversation above
-- EVERY new node MUST connect to an existing node ID from the list
-- Descriptions must be DETAILED (2+ sentences)
-- If user answered about "Technology", ask about SPECIFIC tech choices
-- If user answered about "Users", ask about SPECIFIC user needs
-- Always progress the conversation forward
-
-=== REQUIRED JSON OUTPUT ===
+OUTPUT THIS JSON:
 {
-  "assistantResponse": "Your NEW question that digs deeper into what user just said",
+  "assistantResponse": "<your NEW question about ${lastUserMessage}>",
   "updatedMindMap": {
     "nodes": [
-      {"id": "new-node-1", "label": "Topic from user", "description": "Detailed description based on what user said, at least 2 sentences explaining this aspect"}
+      {"id": "new-<timestamp>", "label": "<topic from user message>", "description": "<details about what user said>"}
     ],
     "edges": [
-      {"source": "EXISTING_NODE_ID_FROM_LIST", "target": "new-node-1"}
-    ],
-    "nodeUpdates": [
-      {"id": "existing-node-id", "description": "Updated description with new context from user"}
+      {"source": "<id of related existing node>", "target": "new-<timestamp>"}
     ]
   },
-  "suggestions": ["Specific option 1", "Specific option 2", "Specific option 3"]
+  "suggestions": ["<specific option 1>", "<specific option 2>", "<specific option 3>"]
 }`;
 };
 
-
 // ============================================================================
-// AI SERVICE - FAST
+// AI SERVICE
 // ============================================================================
 
 export class AIService {
@@ -133,42 +130,61 @@ export class AIService {
 
     const isFirstTurn = chatHistory.length <= 1;
 
-    let prompt: string;
+    // V39: Build messages array with system + user messages
+    const messages: { role: string; content: string }[] = [
+      { role: "system", content: SYSTEM_MESSAGE }
+    ];
 
     if (isFirstTurn) {
-      prompt = buildFirstQuestionPrompt(initialGoal);
+      messages.push({
+        role: "user",
+        content: buildFirstTurnUserMessage(initialGoal)
+      });
     } else {
-      // V38: Use FULL history for proper context tracking
-      const historyString = chatHistory
-        .map(m => `${m.role.toUpperCase()}: ${m.content}`)
+      // Get the last user message prominently
+      const lastUserMsg = chatHistory[chatHistory.length - 1]?.content || "";
+
+      // Build conversation summary (excluding last message)
+      const summary = chatHistory
+        .slice(0, -1)
+        .map(m => `${m.role}: ${m.content}`)
         .join('\n');
 
-      // V38: Extract existing node IDs for the AI to connect to
-      let existingNodesList = "root";
+      // Extract node labels for reference
+      let nodesList = "root";
       try {
         const mapData = JSON.parse(currentMindMapJSON);
         if (mapData.nodes && Array.isArray(mapData.nodes)) {
-          existingNodesList = mapData.nodes
+          nodesList = mapData.nodes
             .map((n: any) => `- ${n.id}: "${n.label}"`)
             .join('\n');
         }
       } catch (e) {
-        console.warn("Could not parse mind map for node list");
+        console.warn("Could not parse mind map");
       }
 
-      prompt = buildMainPrompt(initialGoal, historyString, currentMindMapJSON, existingNodesList);
+      messages.push({
+        role: "user",
+        content: buildMainTurnUserMessage(initialGoal, lastUserMsg, summary, nodesList)
+      });
     }
 
+    console.log("V39 DEBUG: Sending messages:", JSON.stringify(messages, null, 2));
+
     const reply = await engine.chat.completions.create({
-      messages: [{ role: "user", content: prompt }] as any,
-      temperature: 0.3,
-      max_tokens: 600, // Increased for richer descriptions
+      messages: messages as any,
+      temperature: 0.7, // Higher for more creativity, less template copying
+      max_tokens: 600,
       response_format: { type: "json_object" },
     });
 
-    return reply.choices[0].message.content || "";
+    const response = reply.choices[0].message.content || "";
+    console.log("V39 DEBUG: Raw response:", response);
+
+    return response;
   }
 }
 
 export const aiService = AIService.getInstance();
+
 
