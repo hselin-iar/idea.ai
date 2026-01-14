@@ -7,6 +7,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useStore } from '@/lib/store';
 import { aiService, parseAIResponse } from '@/services/ai';
 import { InitProgressReport } from '@mlc-ai/web-llm';
+import ModelSelector from '@/components/ModelSelector';
+import LoginButton from '@/components/Auth/LoginButton';
 
 export default function ChatPanel() {
     const [input, setInput] = useState('');
@@ -167,11 +169,19 @@ export default function ChatPanel() {
     return (
         <div className="flex flex-col h-full bg-zinc-900 border-r border-zinc-800">
             <div className="p-4 border-b border-zinc-800 bg-zinc-900/50 backdrop-blur-sm">
-                <h2 className="text-lg font-semibold flex items-center gap-2 text-zinc-100">
-                    <Bot className="w-5 h-5 text-indigo-400" />
-                    idea.ai
-                </h2>
-                <p className="text-xs text-zinc-500">
+                <div className="flex items-center justify-between">
+                    <h2 className="text-lg font-semibold flex items-center gap-2 text-zinc-100">
+                        <Bot className="w-5 h-5 text-indigo-400" />
+                        idea.ai
+                    </h2>
+                    <div className="flex items-center gap-2">
+                        <LoginButton />
+                        <div className="relative">
+                            <ModelSelector />
+                        </div>
+                    </div>
+                </div>
+                <p className="text-xs text-zinc-500 mt-1">
                     {isLoading && progress > 0 && progress < 1 ? `Loading Brain: ${(progress * 100).toFixed(0)}%` : "Powered by WebLLM"}
                 </p>
             </div>

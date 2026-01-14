@@ -7,7 +7,8 @@ import {
     MiniMap,
     useReactFlow,
     Panel,
-    BackgroundVariant
+    BackgroundVariant,
+    Edge
 } from '@xyflow/react';
 import { toPng } from 'html-to-image';
 import { Download } from 'lucide-react';
@@ -75,9 +76,31 @@ export default function MindMapBoard() {
     const onNodesChange = useStore((state) => state.onNodesChange);
     const onEdgesChange = useStore((state) => state.onEdgesChange);
     const onConnect = useStore((state) => state.onConnect);
+    const setEdges = useStore((state) => state.setEdges);
 
     // Activate force layout
     useForceLayout();
+
+    // V48: Handle edge reconnection (dragging edge to new target or to empty = delete)
+    const onReconnect = (oldEdge: any, newConnection: any) => {
+        // If new connection has valid source and target, reconnect
+        if (newConnection.source && newConnection.target) {
+            const updatedEdges = edges.map(e =>
+                e.id === oldEdge.id
+                    ? { ...e, source: newConnection.source, target: newConnection.target }
+                    : e
+            );
+            setEdges(updatedEdges);
+        }
+    };
+
+    // V48: Delete edge when dragged to empty space
+    const onReconnectEnd = (_: unknown, edge: Edge, handleType: string | null) => {
+        // If handleType is undefined, the edge was dropped in empty space - delete it
+        if (!handleType) {
+            setEdges(edges.filter((e) => e.id !== edge.id));
+        }
+    };
 
     return (
         <div className="w-full h-full bg-zinc-950">
@@ -87,9 +110,11 @@ export default function MindMapBoard() {
                 onNodesChange={onNodesChange}
                 onEdgesChange={onEdgesChange}
                 onConnect={onConnect}
+                onReconnect={onReconnect}
                 nodeTypes={nodeTypes}
                 colorMode="dark"
                 fitView
+                edgesReconnectable={true}
             >
                 <Background variant={BackgroundVariant.Dots} gap={12} size={1} color="#3f3f46" />
                 <Controls className="bg-zinc-800 border-zinc-700 fill-zinc-400" />

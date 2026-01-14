@@ -138,10 +138,7 @@ export default function WorkspacePage() {
                     isSidebarOpen ? "w-[400px]" : "w-0 opacity-0 overflow-hidden"
                 )}
             >
-                {/* Header with Login */}
-                <div className="absolute top-4 right-4 z-50">
-                    <LoginButton />
-                </div>
+                {/* Header with Login removed - moved to ChatPanel */}
                 <ChatPanel />
             </div>
 
