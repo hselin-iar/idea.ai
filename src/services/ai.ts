@@ -23,112 +23,66 @@ export type ModelSize = keyof typeof MODEL_OPTIONS;
 let SELECTED_MODEL: string = MODEL_OPTIONS["1.5B"].id;
 
 // ============================================================================
-// V49: INTENT PREPROCESSING - Extract user intent before sending to AI
+// V53: GENERALIZED INTENT - No hardcoded counts or specific domains
 // ============================================================================
 
 interface UserIntent {
   action: 'add' | 'explain' | 'list' | 'expand' | 'general';
   topic: string;
   keywords: string[];
-  suggestedNodeCount: number;
+  // Removed suggestedNodeCount to let AI decide naturally
 }
 
-/**
- * V49: Extract structured intent from natural language user message
- * This helps the small model understand what the user wants
- */
 const extractUserIntent = (message: string): UserIntent => {
   const lower = message.toLowerCase();
 
-  // Detect action type from common patterns
+  // Gentle action detection - advisory only
   let action: UserIntent['action'] = 'general';
+  if (/\b(steps|procedure|process|workflow|how to)\b/.test(lower)) action = 'list';
+  else if (/\b(add|create|suggest|list|give me)\b/.test(lower)) action = 'list';
+  else if (/\b(explain|what is|how does|describe)\b/.test(lower)) action = 'explain';
+  else if (/\b(expand|more|details|elaborate)\b/.test(lower)) action = 'expand';
+  else if (/\b(create|make|build)\b/.test(lower)) action = 'add';
 
-  if (/\b(steps|procedure|process|workflow|how to)\b/.test(lower)) {
-    action = 'list'; // Treat steps as a list
-  } else if (/\b(add|include|suggest|recommend|list|give me|show me|what are|examples)\b/.test(lower)) {
-    action = 'list';
-  } else if (/\b(explain|what is|how does|describe|tell me about)\b/.test(lower)) {
-    action = 'explain';
-  } else if (/\b(expand|more|details|elaborate|dig into)\b/.test(lower)) {
-    action = 'expand';
-  } else if (/\b(create|make|build|set up)\b/.test(lower)) {
-    action = 'add';
-  }
-
-  // Extract key topic words (remove common filler words)
-  const fillerWords = new Set([
+  // Minimal stop words list - keep short useful words like "AI", "UI", "Go"
+  const stopWords = new Set([
     'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
     'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should',
     'may', 'might', 'must', 'can', 'for', 'of', 'to', 'in', 'on', 'at', 'by',
-    'with', 'about', 'into', 'through', 'from', 'up', 'out', 'and', 'or', 'but',
-    'so', 'if', 'then', 'than', 'that', 'this', 'these', 'those', 'what', 'which',
-    'who', 'whom', 'whose', 'where', 'when', 'why', 'how', 'all', 'each', 'every',
-    'both', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'not', 'only',
-    'same', 'just', 'also', 'very', 'my', 'your', 'our', 'their', 'its', 'me',
-    'please', 'thanks', 'want', 'need', 'like', 'add', 'include', 'suggest', 'give',
-    'steps', 'process', 'procedure'
+    'with', 'about', 'from', 'and', 'or', 'but', 'so', 'if', 'then', 'that',
+    'this', 'these', 'those', 'what', 'which', 'who', 'where', 'when', 'why', 'how',
+    'please', 'thanks', 'want', 'need', 'like'
   ]);
 
   const words = message.toLowerCase().split(/\s+/);
-  const keywords = words.filter(w => w.length > 2 && !fillerWords.has(w));
+  const keywords = words.filter(w => w.length > 1 && !stopWords.has(w)); // Allow 2-letter words
 
-  // Extract main topic (longest remaining keyword or first noun-like word)
   const topic = keywords.length > 0
     ? keywords.reduce((a, b) => a.length >= b.length ? a : b)
     : message.slice(0, 30);
 
-  // Suggest node count based on action type
-  let suggestedNodeCount = 2;
-  if (action === 'list') suggestedNodeCount = 5;
-  else if (action === 'explain') suggestedNodeCount = 2;
-  else if (action === 'expand') suggestedNodeCount = 4;
-  else if (action === 'add') suggestedNodeCount = 3;
-
-  return { action, topic, keywords, suggestedNodeCount };
+  return { action, topic, keywords };
 };
 
-/**
- * System message - Comprehensive planning, no useless questions
- */
-const SYSTEM_MESSAGE = `You are a project planning assistant.
-Create comprehensive mind maps with real, specific content.
-Use your knowledge to suggest technologies, strategies, and steps.
+const SYSTEM_MESSAGE = `You are a helper.
+Create clear, structured mind maps.
+Use bullet points for details.
 Keep responses concise.`;
 
-/**
- * FIRST TURN: Create comprehensive structure
- * V50: Restored "Large Base" - asking for 8-10 nodes
- */
 const buildFirstTurnUserMessage = (goal: string): string => {
   return `Goal: ${goal}
 
-Create a large, comprehensive mind map with 8-10 main topics covering all key aspects.
-Use your knowledge to suggest SPECIFIC, REAL things (not placeholders).
+Create a comprehensive mind map with 8-10 main topics to cover this goal.
+Use specific, real details.
 
 Reply format:
-MESSAGE: Here's your plan for ${goal}. Click any topic to expand.
-TOPIC1: Topic Name|Specific description with real details
-TOPIC2: Topic Name|Specific description with real details
-TOPIC3: Topic Name|Specific description with real details
-TOPIC4: Topic Name|Specific description with real details
-TOPIC5: Topic Name|Specific description with real details
-TOPIC6: Topic Name|Specific description with real details
-TOPIC7: Topic Name|Specific description with real details
-TOPIC8: Topic Name|Specific description with real details
-TOPIC9: Topic Name|Specific description with real details
-TOPIC10: Topic Name|Specific description with real details
-OPTIONS: TopicName1, TopicName2, TopicName3
-
-RULES:
-- Generate at least 8 main topics to form a strong base
-- Each description must contain REAL, USEFUL information
-- No brackets [] around text
-- OPTIONS must use actual topic names you created`;
+MESSAGE: Brief introduction.
+TOPIC1: Topic Name|Description
+...
+TOPIC10: Topic Name|Description
+OPTIONS: Topic1, Topic2, Topic3`;
 };
 
-/**
- * V50: Intent-aware prompting + Multi-Parent Support
- */
 const buildMainTurnUserMessage = (
   goal: string,
   lastUserMessage: string,
@@ -138,48 +92,36 @@ const buildMainTurnUserMessage = (
 ): string => {
   const intent = extractUserIntent(lastUserMessage);
 
-  const intentDescription = {
-    'list': 'User wants a LIST of specific items/options',
-    'explain': 'User wants an EXPLANATION of a concept',
-    'expand': 'User wants MORE DETAILS on an existing topic',
-    'add': 'User wants to ADD/CREATE something new',
-    'general': 'User has a general question'
-  }[intent.action];
-
   return `Context: "${goal}"
 
 USER REQUEST: "${lastUserMessage}"
-INTENT: ${intentDescription}
-KEY TOPICS: ${intent.keywords.join(', ') || 'general'}
-SUGGESTED NODES: ${intent.suggestedNodeCount}
-
+KEYWORDS: ${intent.keywords.join(', ') || 'general'}
 Existing nodes: ${existingLabels}
 
 TASK:
-1. Find which existing node(s) relate to: ${intent.topic}
-2. Create ${intent.suggestedNodeCount} new nodes with REAL, SPECIFIC content
-3. Format descriptions using bullet points (•) for readability
-4. If addressing multiple existing nodes, specify PARENT before each group
+1. Find relevant existing nodes for these keywords.
+2. Create new nodes with specific content.
+3. If addressing multiple existing nodes, specify PARENT before each group.
 
 Reply format:
 MESSAGE: Brief response
 PARENT: [Related Node A]
-NEWTOPIC: Name|Description • Fact 1 • Fact 2
+NEWTOPIC: Name|Description • Detail 1
 PARENT: [Related Node B]
-NEWTOPIC: Name|Description • Fact 1 • Fact 2
-OPTIONS: [Names of nodes you created]
+NEWTOPIC: Name|Description • Detail 1
+OPTIONS: [New Node Names]
 
 EXAMPLE:
-User: "list databases"
-PARENT: Tech Stack
-NEWTOPIC: PostgreSQL|Relational database • ACID compliant • SQL standard
-NEWTOPIC: MongoDB|NoSQL document store • Flexible schema • JSON-like
-OPTIONS: PostgreSQL, MongoDB
+User: "Add more details"
+PARENT: Category A
+NEWTOPIC: Item 1|Description • Detail
+NEWTOPIC: Item 2|Description • Detail
+OPTIONS: Item 1, Item 2
 
 RULES:
-- PARENT must be from the existing nodes list
-- To add to different nodes, repeat the PARENT: line
-- Descriptions MUST use "•" to separate facts`;
+- PARENT must be an existing node name
+- Repeat PARENT to switch context
+- Use "•" for bullets`;
 };
 
 
@@ -286,7 +228,7 @@ export const parseAIResponse = (response: string, goal: string, existingNodes: a
         let bestMatch = null;
 
         const searchPhrase = (lastUserMessage + " " + topic.name).toLowerCase();
-        const searchTokens = searchPhrase.split(/\s+/).filter(t => t.length > 2); // Filter small words
+        const searchTokens = searchPhrase.split(/\s+/).filter(t => t.length > 1); // Allow short words
 
         for (const node of existingNodes) {
           // Skip root for semantic matching unless explicit? (User says forbid connecting to root by default)
@@ -295,16 +237,20 @@ export const parseAIResponse = (response: string, goal: string, existingNodes: a
           const label = (node.data?.label || node.label || "").toLowerCase();
           const nodeTokens = label.split(/\s+/);
 
-          // Simple overlap score (0.0 - 1.0)
-          let matchCount = 0;
+          // V53: Weighted Scoring (Exact > Partial)
+          let matchScore = 0;
           for (const token of searchTokens) {
-            if (nodeTokens.some((nt: string) => nt.includes(token) || token.includes(nt))) {
-              matchCount++;
+            for (const nt of nodeTokens) {
+              if (nt === token) {
+                matchScore += 1.0; // Exact match
+              } else if (token.length > 3 && nt.includes(token)) {
+                matchScore += 0.5; // Partial match (only if token is significant)
+              }
             }
           }
 
           // Normalize score
-          const score = searchTokens.length > 0 ? (matchCount / searchTokens.length) : 0;
+          const score = searchTokens.length > 0 ? (matchScore / searchTokens.length) : 0;
 
           if (score > bestScore) {
             bestScore = score;
