@@ -246,20 +246,30 @@ export const parseAIResponse = (response: string, goal: string, existingNodes: a
     const newNodes: any[] = [];
     const newEdges: any[] = [];
 
-    // Helper: calculate word overlap score
-    const getOverlapScore = (nodeLabel: string, searchText: string): number => {
-      const nodeWords = nodeLabel.toLowerCase().split(/\s+/);
-      const searchWords = searchText.toLowerCase().split(/\s+/);
-      return searchWords.filter(sw => nodeWords.some(nw => nw.includes(sw) || sw.includes(nw))).length;
-    };
-
+    // V51: Contextual Anchor Selection Algorithm
+    // Step 1: Identify Candidates & Focus
     const rootNode = existingNodes.find(n => n.id.includes('root') || existingNodes.indexOf(n) === 0);
     const rootId = rootNode?.id;
 
-    topics.forEach((topic, index) => {
-      let parentId = defaultParentId;
+    // Helper: Parse timestamp from ID (node-TIMESTAMP-index)
+    const getTimestamp = (id: string) => {
+      const match = id.match(/node-(\d+)-/);
+      return match ? parseInt(match[1]) : 0;
+    };
 
-      // 1. Try Topic's specific Preferred Parent
+    // Find "Most Recent Node" (Last Resort Fallback) - Exclude Root
+    const sortedByRecency = [...existingNodes]
+      .filter(n => n.id !== rootId)
+      .sort((a, b) => getTimestamp(b.id) - getTimestamp(a.id));
+    const mostRecentNode = sortedByRecency[0];
+
+    // Identify "Current Focus" (passed as defaultParentId)
+    const focusNodeId = defaultParentId !== rootId ? defaultParentId : null;
+
+    topics.forEach((topic, index) => {
+      let parentId = ""; // Start undefined to force selection logic
+
+      // 1. AI Explicit Preference (Highest Priority if valid)
       if (topic.preferredParent) {
         const matchingNode = existingNodes.find(n => {
           const label = (n.data?.label || n.label || "").toLowerCase();
@@ -269,22 +279,57 @@ export const parseAIResponse = (response: string, goal: string, existingNodes: a
           parentId = matchingNode.id;
         }
       }
-      // 2. Fallback: If no preferred parent (or not found), try context matching
-      if (parentId === defaultParentId || parentId === rootId) {
-        let bestScore = 0;
+
+      // 2. Semantic Scoring (If no AI Preference found)
+      if (!parentId) {
+        let bestScore = 0.0;
         let bestMatch = null;
+
+        const searchPhrase = (lastUserMessage + " " + topic.name).toLowerCase();
+        const searchTokens = searchPhrase.split(/\s+/).filter(t => t.length > 2); // Filter small words
+
         for (const node of existingNodes) {
+          // Skip root for semantic matching unless explicit? (User says forbid connecting to root by default)
           if (node.id === rootId) continue;
-          const label = node.data?.label || node.label || "";
-          // Match against user message AND topic name to be smart
-          const score = getOverlapScore(label, lastUserMessage + " " + topic.name);
+
+          const label = (node.data?.label || node.label || "").toLowerCase();
+          const nodeTokens = label.split(/\s+/);
+
+          // Simple overlap score (0.0 - 1.0)
+          let matchCount = 0;
+          for (const token of searchTokens) {
+            if (nodeTokens.some((nt: string) => nt.includes(token) || token.includes(nt))) {
+              matchCount++;
+            }
+          }
+
+          // Normalize score
+          const score = searchTokens.length > 0 ? (matchCount / searchTokens.length) : 0;
+
           if (score > bestScore) {
             bestScore = score;
             bestMatch = node;
           }
         }
-        if (bestMatch && bestScore > 0) parentId = bestMatch.id;
+
+        // Step 3: Choose Anchor
+        if (bestMatch && bestScore > 0.35) {
+          parentId = bestMatch.id; // Semantic Winner
+        } else {
+          // Step 4: Fallback (Score <= 0.35)
+          // "If no node scores above 0.35, use the most recently created or most recently interacted node."
+
+          if (focusNodeId) {
+            parentId = focusNodeId; // Primary Fallback: Current Focus
+          } else if (mostRecentNode) {
+            parentId = mostRecentNode.id; // Secondary Fallback: Last created
+          } else {
+            parentId = rootId || defaultParentId; // Absolute Last Resort: Root
+          }
+        }
       }
+      // Safety check
+      if (!parentId) parentId = rootId || defaultParentId;
 
       // Create Node
       const nodeId = `node-${timestamp}-${index}-new`; // unique suffix
