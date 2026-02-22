@@ -2,22 +2,52 @@
 
 import { useAuth } from '@/contexts/AuthContext';
 import { LogIn, LogOut, User as UserIcon } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { FirebaseError } from 'firebase/app';
 
 export default function LoginButton() {
     const { user, signInWithGoogle, signOut, loading } = useAuth();
-    const [isHovering, setIsHovering] = useState(false);
+    const [isMenuOpen, setIsMenuOpen] = useState(false);
+    const menuRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        if (!isMenuOpen) return;
+
+        const handlePointerDown = (event: MouseEvent) => {
+            if (!menuRef.current?.contains(event.target as globalThis.Node)) {
+                setIsMenuOpen(false);
+            }
+        };
+
+        const handleEscape = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') {
+                setIsMenuOpen(false);
+            }
+        };
+
+        document.addEventListener('mousedown', handlePointerDown);
+        document.addEventListener('keydown', handleEscape);
+        return () => {
+            document.removeEventListener('mousedown', handlePointerDown);
+            document.removeEventListener('keydown', handleEscape);
+        };
+    }, [isMenuOpen]);
 
     if (loading) return <div className="w-8 h-8 rounded-full bg-zinc-800 animate-pulse" />;
 
     if (user) {
         return (
             <div
+                ref={menuRef}
                 className="relative group z-50"
-                onMouseEnter={() => setIsHovering(true)}
-                onMouseLeave={() => setIsHovering(false)}
             >
-                <button className="flex items-center gap-2">
+                <button
+                    onClick={() => setIsMenuOpen((open) => !open)}
+                    className="flex items-center gap-2"
+                    aria-haspopup="menu"
+                    aria-expanded={isMenuOpen}
+                    aria-label="User profile menu"
+                >
                     {user.photoURL ? (
                         <img
                             src={user.photoURL}
@@ -31,14 +61,17 @@ export default function LoginButton() {
                     )}
                 </button>
 
-                {isHovering && (
+                {isMenuOpen && (
                     <div className="absolute right-0 top-full mt-2 w-48 bg-zinc-900 border border-zinc-800 rounded-xl shadow-xl overflow-hidden py-1">
                         <div className="px-4 py-2 border-b border-zinc-800">
                             <p className="text-sm font-medium text-zinc-200 truncate">{user.displayName}</p>
                             <p className="text-xs text-zinc-500 truncate">{user.email}</p>
                         </div>
                         <button
-                            onClick={() => signOut()}
+                            onClick={() => {
+                                setIsMenuOpen(false);
+                                signOut();
+                            }}
                             className="w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-zinc-800 flex items-center gap-2 transition-colors"
                         >
                             <LogOut size={14} />
@@ -53,12 +86,13 @@ export default function LoginButton() {
     const signIn = async () => {
         try {
             await signInWithGoogle();
-        } catch (e: any) {
+        } catch (e: unknown) {
             console.error("Login failed", e);
-            if (e.code === 'auth/invalid-api-key' || e.code === 'auth/configuration-not-found') {
+            if (e instanceof FirebaseError && (e.code === 'auth/invalid-api-key' || e.code === 'auth/configuration-not-found')) {
                 alert("Login Failed: Missing Firebase Configuration.\n\nPlease check your .env.local file and ensure all keys are set correctly.");
             } else {
-                alert(`Login Failed: ${e.message}`);
+                const message = e instanceof Error ? e.message : 'Unknown error';
+                alert(`Login Failed: ${message}`);
             }
         }
     };

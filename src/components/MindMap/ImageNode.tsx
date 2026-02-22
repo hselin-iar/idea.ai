@@ -1,6 +1,6 @@
 import { memo, useState } from 'react';
 import { Handle, Position, NodeProps, Node } from '@xyflow/react';
-import { ImageIcon, MoreVertical, Trash2, Copy, ChevronDown, ChevronRight } from 'lucide-react';
+import { ImageIcon, MoreVertical, Trash2, Copy } from 'lucide-react';
 import { useStore } from '@/lib/store';
 
 // Define the custom data type extending Record<string, unknown> as required by React Flow

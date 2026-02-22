@@ -2,15 +2,15 @@
 
 import { useEffect, useState, useRef } from 'react';
 import { useParams } from 'next/navigation';
-import { useStore } from '@/lib/store';
+import { useStore, type Message } from '@/lib/store';
 import ChatPanel from '@/components/Chat/ChatPanel';
 import MindMapBoard from '@/components/MindMap/MindMapBoard';
-import LoginButton from '@/components/Auth/LoginButton';
 import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useAuth } from '@/contexts/AuthContext';
 import { doc, onSnapshot, setDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
+import type { Edge, Node } from '@xyflow/react';
 
 export default function WorkspacePage() {
     const params = useParams();
@@ -20,10 +20,8 @@ export default function WorkspacePage() {
     const { user, loading: authLoading } = useAuth();
 
     // Store Actions
-    const setGoal = useStore((state) => state.setGoal);
-    const setMessages = useStore((state) => state.setMessages);
-    const setNodes = useStore((state) => state.setNodes);
-    const setEdges = useStore((state) => state.setEdges);
+    const setSessionData = useStore((state) => state.setSessionData);
+    const resetSessionState = useStore((state) => state.resetSessionState);
 
     // Store State (for saving)
     const goal = useStore((state) => state.goal);
@@ -36,66 +34,109 @@ export default function WorkspacePage() {
 
     // Ref to track if we are currently loading data to prevent overwriting it with empty state immediately
     const isHydratingRef = useRef(true);
+    const lastSyncedCoreRef = useRef('');
+
+    const serializeSessionCore = (data: {
+        goal?: string;
+        messages?: Message[];
+        nodes?: Node[];
+        edges?: Edge[];
+    }) => JSON.stringify({
+        goal: data.goal || '',
+        messages: data.messages || [],
+        nodes: data.nodes || [],
+        edges: data.edges || [],
+    });
 
     // 1. Data Loading Effect
     useEffect(() => {
         if (authLoading) return;
 
         let unsubscribe: () => void = () => { };
-
-        const loadData = async () => {
-            isHydratingRef.current = true;
-
-            if (user) {
-                // Cloud Sync
-                const sessionRef = doc(db, 'users', user.uid, 'sessions', id);
-                unsubscribe = onSnapshot(sessionRef, (doc) => {
-                    if (doc.exists()) {
-                        const data = doc.data();
-                        // Only update if remote data makes sense (simple conflict resolution: last write wins via snapshot)
-                        // Note: ideally we check timestamps, but for MVP snapshot is fine.
-                        // We avoid loop by checking deep equality or trusting React state diffing, 
-                        // but here we just set it. 
-                        // WARN: This might cause "fighting" if we edit while multiple tabs open.
-                        if (data.goal) setGoal(data.goal);
-                        if (data.messages) setMessages(data.messages);
-                        if (data.nodes) setNodes(data.nodes);
-                        if (data.edges) setEdges(data.edges);
-                    }
-                    if (isHydratingRef.current) {
-                        isHydratingRef.current = false;
-                        setIsLoaded(true);
-                    }
-                });
-            } else {
-                // Local Storage
-                const storedSession = localStorage.getItem(`idea-ai-session-${id}`);
-                if (storedSession) {
-                    try {
-                        const data = JSON.parse(storedSession);
-                        if (data.goal) setGoal(data.goal);
-                        if (data.messages) setMessages(data.messages);
-                        if (data.nodes) setNodes(data.nodes);
-                        if (data.edges) setEdges(data.edges);
-                    } catch (e) {
-                        console.error("Local storage load error", e);
-                    }
-                }
-                isHydratingRef.current = false;
-                setIsLoaded(true);
+        let loadTimer: ReturnType<typeof setTimeout> | undefined;
+        isHydratingRef.current = true;
+        resetSessionState();
+        const markLoaded = () => {
+            if (loadTimer) {
+                clearTimeout(loadTimer);
             }
+            loadTimer = setTimeout(() => setIsLoaded(true), 0);
         };
 
-        loadData();
+        if (user) {
+            // Firestore is canonical for signed-in users.
+            const sessionRef = doc(db, 'users', user.uid, 'sessions', id);
+            unsubscribe = onSnapshot(sessionRef, (sessionDoc) => {
+                let nextCore: { goal: string; messages: Message[]; nodes: Node[]; edges: Edge[] };
+                if (sessionDoc.exists()) {
+                    const data = sessionDoc.data();
+                    nextCore = {
+                        goal: data.goal || '',
+                        messages: data.messages || [],
+                        nodes: data.nodes || [],
+                        edges: data.edges || [],
+                    };
+                } else {
+                    // New session document: start clean.
+                    nextCore = {
+                        goal: '',
+                        messages: [],
+                        nodes: [],
+                        edges: [],
+                    };
+                }
 
-        return () => unsubscribe();
-    }, [id, user, authLoading, setGoal, setMessages, setNodes, setEdges]);
+                const serializedCore = serializeSessionCore(nextCore);
+                if (serializedCore !== lastSyncedCoreRef.current) {
+                    setSessionData(nextCore);
+                    lastSyncedCoreRef.current = serializedCore;
+                }
+
+                if (isHydratingRef.current) {
+                    isHydratingRef.current = false;
+                    markLoaded();
+                }
+            });
+        } else {
+            // Guest fallback: session-scoped local storage only.
+            const storedSession = localStorage.getItem(`idea-ai-session-${id}`);
+            if (storedSession) {
+                try {
+                    const data = JSON.parse(storedSession);
+                    const nextCore = {
+                        goal: data.goal || '',
+                        messages: data.messages || [],
+                        nodes: data.nodes || [],
+                        edges: data.edges || [],
+                    };
+                    setSessionData(nextCore);
+                    lastSyncedCoreRef.current = serializeSessionCore(nextCore);
+                } catch (e) {
+                    console.error("Local storage load error", e);
+                }
+            } else {
+                setSessionData({});
+                lastSyncedCoreRef.current = serializeSessionCore({});
+            }
+            isHydratingRef.current = false;
+            markLoaded();
+        }
+
+        return () => {
+            if (loadTimer) clearTimeout(loadTimer);
+            unsubscribe();
+        };
+    }, [id, user, authLoading, setSessionData, resetSessionState]);
 
     // 2. Data Saving Effect (Debounced)
     useEffect(() => {
         if (authLoading || isHydratingRef.current || !isLoaded) return;
 
         const saveData = async () => {
+            const core = { goal, messages, nodes, edges };
+            const serializedCore = serializeSessionCore(core);
+            if (serializedCore === lastSyncedCoreRef.current) return;
+
             const sessionData = {
                 id,
                 goal,
@@ -107,13 +148,17 @@ export default function WorkspacePage() {
 
             if (user) {
                 // Save to Cloud
+                const previousSyncedCore = lastSyncedCoreRef.current;
                 try {
+                    lastSyncedCoreRef.current = serializedCore;
                     await setDoc(doc(db, 'users', user.uid, 'sessions', id), sessionData, { merge: true });
                 } catch (e) {
+                    lastSyncedCoreRef.current = previousSyncedCore;
                     console.error("Cloud save failed", e);
                 }
             } else {
                 // Save to Local
+                lastSyncedCoreRef.current = serializedCore;
                 localStorage.setItem(`idea-ai-session-${id}`, JSON.stringify(sessionData));
             }
         };

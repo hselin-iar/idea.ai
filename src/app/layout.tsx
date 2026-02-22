@@ -14,39 +14,24 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en" className="dark" suppressHydrationWarning>
       <head>
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
-        <script src="https://cdn.tailwindcss.com"></script>
-        {/* Configure CDN to match our custom theme variables if needed, specifically colors */}
-        <script dangerouslySetInnerHTML={{
-          __html: `
-          tailwind.config = {
-            theme: {
-              extend: {
-                colors: {
-                  background: '#09090b',
-                  foreground: '#fafafa',
-                  primary: '#6366f1',
-                  secondary: '#18181b',
-                  accent: '#2e1065',
-                },
-                fontFamily: {
-                  sans: ['Inter', 'sans-serif'],
-                }
-              }
-            }
-          }
-        `}} />
+        <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+        <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
       </head>
-      <body style={{ fontFamily: "'Inter', sans-serif" }}>
-        <AuthProvider>
-          <ReactFlowProvider>
-            {children}
-          </ReactFlowProvider>
-        </AuthProvider>
+      <body className="antialiased text-text-main dark:text-surface-light bg-background-light dark:bg-background-dark bg-paper bg-repeat min-h-screen relative selection:bg-primary/30">
+        {/* Global Noise Overlay */}
+        <div className="fixed inset-0 pointer-events-none opacity-40 z-0 bg-noise mix-blend-overlay"></div>
+
+        <div className="relative z-10 h-full">
+          <AuthProvider>
+            <ReactFlowProvider>
+              {children}
+            </ReactFlowProvider>
+          </AuthProvider>
+        </div>
       </body>
     </html>
   );

@@ -38,6 +38,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             await signInWithPopup(auth, provider);
         } catch (error) {
             console.error("Error signing in with Google", error);
+            throw error;
         }
     };
 
@@ -46,6 +47,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             await firebaseSignOut(auth);
         } catch (error) {
             console.error("Error signing out", error);
+            throw error;
         }
     };
 

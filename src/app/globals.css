@@ -1,105 +1,111 @@
-/* Tailwind directives removed - using CDN */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
 :root {
-  --background: #09090b;
-  --foreground: #fafafa;
-
-  /* Modern Violet/Indigo Palette */
-  --primary: #6366f1;
-  /* Indigo 500 */
-  --primary-foreground: #ffffff;
-
-  --secondary: #18181b;
-  /* Zinc 900 */
-  --secondary-foreground: #fafafa;
-
-  --muted: #27272a;
-  /* Zinc 800 */
-  --muted-foreground: #a1a1aa;
-  /* Zinc 400 */
-
-  --accent: #2e1065;
-  /* Violet 950 */
-  --accent-foreground: #ddd6fe;
-  /* Violet 200 */
-
-  --card: #09090b;
-  --card-foreground: #fafafa;
-
-  --border: #27272a;
-
-  /* Glassmorphism */
-  --glass-bg: rgba(9, 9, 11, 0.6);
-  --glass-border: rgba(255, 255, 255, 0.08);
-  --glass-blur: 12px;
-
-  /* Gradients */
-  --gradient-primary: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
-  --gradient-dark: linear-gradient(to bottom right, #09090b, #18181b);
+  --background: #2a2826;
+  --foreground: #e6e2dd;
 }
 
-* {
-  box-sizing: border-box;
+@media (prefers-color-scheme: light) {
+  :root {
+    --background: #2a2826;
+    /* Force dark mode */
+    --foreground: #e6e2dd;
+  }
 }
 
 body {
   color: var(--foreground);
   background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
-  overflow-x: hidden;
-  margin: 0;
-  padding: 0;
-  min-height: 100vh;
+  font-family: 'Space Grotesk', sans-serif;
 }
 
-/* Scrollbar */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+.text-balance {
+  text-wrap: balance;
 }
 
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-::-webkit-scrollbar-thumb {
-  background: var(--muted);
-  border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: var(--muted-foreground);
-}
-
-/* Animations */
-@keyframes fadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.animate-fade-in {
-  animation: fadeIn 0.4s ease-out forwards;
-}
-
-/* Utilities */
 .glass {
-  background: var(--glass-bg);
-  backdrop-filter: blur(var(--glass-blur));
-  -webkit-backdrop-filter: blur(var(--glass-blur));
-  border: 1px solid var(--glass-border);
+  background-color: rgba(42, 40, 38, 0.7);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.neumorphic-btn {
+  background: #2a2826;
+  box-shadow: 6px 6px 12px #1f1e1c, -6px -6px 12px #35322e;
+  transition: all 0.3s ease;
+  color: #e6e2dd;
+}
+
+.neumorphic-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 8px 8px 16px #1f1e1c, -8px -8px 16px #35322e;
+}
+
+.neumorphic-btn:active {
+  transform: translateY(0);
+  box-shadow: inset 4px 4px 8px #1f1e1c, inset -4px -4px 8px #35322e;
+}
+
+.plan-card {
+  background: #1c1b1a;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  width: 260px;
+  padding: 14px 16px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
+}
+
+.plan-card:hover {
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.section-card {
+  background: #2a2826;
+  border: 1.5px solid rgba(43, 140, 238, 0.4);
+  border-radius: 12px;
+  width: 280px;
+  padding: 16px 20px;
+  box-shadow: 0 4px 16px rgba(43, 140, 238, 0.15), inset 0 0 20px rgba(43, 140, 238, 0.05);
+  transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
+}
+
+.section-card:hover {
+  box-shadow: 0 8px 32px rgba(43, 140, 238, 0.3), inset 0 0 30px rgba(43, 140, 238, 0.1);
+  border-color: rgba(43, 140, 238, 0.7);
+}
+
+.input-groove {
+  background: #2a2826;
+  box-shadow: inset 6px 6px 12px #1f1e1c, inset -6px -6px 12px #35322e;
 }
 
 .text-gradient {
-  background: var(--gradient-primary);
+  background: linear-gradient(135deg, #e6e2dd 0%, #a8a49e 100%);
+  background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
-  background-clip: text;
   color: transparent;
+}
+
+.text-stroke-white {
+  -webkit-text-stroke: 1px rgba(255, 255, 255, 0.4);
+  color: transparent;
+}
+
+.engraved-card {
+  background: #2a2826;
+  box-shadow: inset 8px 8px 16px #1f1e1c, inset -8px -8px 16px #35322e;
+}
+
+.raised-card {
+  background: #2a2826;
+  box-shadow: 8px 8px 16px #1f1e1c, -8px -8px 16px #35322e;
+}
+
+.raised-card-green {
+  background: #2c2f2a;
+  box-shadow: 8px 8px 16px #1f211d, -8px -8px 16px #393d37;
 }

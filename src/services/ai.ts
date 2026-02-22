@@ -1,7 +1,93 @@
 import { CreateMLCEngine, MLCEngine, InitProgressCallback } from "@mlc-ai/web-llm";
 
-// Model options with metadata
-export const MODEL_OPTIONS = {
+// ============================================================================
+// INTERFACES & TYPES - Strict typing throughout
+// ============================================================================
+
+/** Model configuration for WebLLM */
+export interface ModelConfig {
+  readonly id: string;
+  readonly name: string;
+  readonly downloadSize: string;
+  readonly ramRequired: string;
+  readonly description: string;
+}
+
+/** Available model sizes */
+export type ModelSize = "1.5B" | "3B";
+
+export type NodeClass =
+  | 'goal'
+  | 'section'
+  | 'subgoal'
+  | 'task'
+  | 'resource'
+  | 'constraint'
+  | 'metric'
+  | 'idea';
+
+/** Valid node types for React Flow rendering */
+export type NodeType = 'expandable' | 'question' | 'checklist' | 'metric';
+
+/** Parsed topic from AI response */
+export interface ParsedTopic {
+  name: string;
+  description: string;
+  preferredParent?: string;
+  nodeClass: NodeClass;
+  nodeType: NodeType;
+}
+
+/** Node structure for mind map */
+export interface MindMapNode {
+  id: string;
+  label: string;
+  description: string;
+  nodeClass: NodeClass;
+  nodeType?: NodeType; // Optional - defaults to 'expandable'
+  items?: { id: string; text: string; completed: boolean }[];
+}
+
+/** Edge structure for mind map */
+export interface MindMapEdge {
+  source: string;
+  target: string;
+}
+
+/** Parsed AI response structure */
+export interface ParsedAIResponse {
+  assistantResponse: string;
+  updatedMindMap: {
+    nodes: MindMapNode[];
+    edges: MindMapEdge[];
+  };
+  suggestions: string[];
+  redirectTo?: string;
+  redirectReason?: string;
+}
+
+/** Chat message structure */
+export interface ChatMessage {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+}
+
+/** Planning context classification */
+export type PlanningContext =
+  | 'new_project'      // Fresh start - empathy questions
+  | 'problem_solving'  // Problem stated - root cause analysis
+  | 'decision_making'  // Choosing options - multi-perspective
+  | 'brainstorming'    // Needs ideas - divergent thinking
+  | 'refinement'       // Improving existing - SCAMPER
+  | 'execution'        // Ready to act - journey/task breakdown
+  | 'validation'       // Checking assumptions - iteration loops
+  | 'general';         // Default
+
+// ============================================================================
+// MODEL CONFIGURATION
+// ============================================================================
+
+export const MODEL_OPTIONS: Record<ModelSize, ModelConfig> = {
   "1.5B": {
     id: "Qwen2.5-1.5B-Instruct-q4f32_1-MLC",
     name: "Fast (1.5B)",
@@ -16,311 +102,648 @@ export const MODEL_OPTIONS = {
     ramRequired: "~4GB",
     description: "Better reasoning, requires more resources"
   }
-} as const;
+};
 
-export type ModelSize = keyof typeof MODEL_OPTIONS;
-
-let SELECTED_MODEL: string = MODEL_OPTIONS["1.5B"].id;
+let selectedModelId: string = MODEL_OPTIONS["1.5B"].id;
 
 // ============================================================================
-// V53: GENERALIZED INTENT - No hardcoded counts or specific domains
+// NODE CLASS HIERARCHY - For intelligent parent selection
 // ============================================================================
 
-interface UserIntent {
-  action: 'add' | 'explain' | 'list' | 'expand' | 'general';
-  topic: string;
-  keywords: string[];
-  // Removed suggestedNodeCount to let AI decide naturally
-}
-
-const extractUserIntent = (message: string): UserIntent => {
-  const lower = message.toLowerCase();
-
-  // Gentle action detection - advisory only
-  let action: UserIntent['action'] = 'general';
-  if (/\b(steps|procedure|process|workflow|how to)\b/.test(lower)) action = 'list';
-  else if (/\b(add|create|suggest|list|give me)\b/.test(lower)) action = 'list';
-  else if (/\b(explain|what is|how does|describe)\b/.test(lower)) action = 'explain';
-  else if (/\b(expand|more|details|elaborate)\b/.test(lower)) action = 'expand';
-  else if (/\b(create|make|build)\b/.test(lower)) action = 'add';
-
-  // Minimal stop words list - keep short useful words like "AI", "UI", "Go"
-  const stopWords = new Set([
-    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
-    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should',
-    'may', 'might', 'must', 'can', 'for', 'of', 'to', 'in', 'on', 'at', 'by',
-    'with', 'about', 'from', 'and', 'or', 'but', 'so', 'if', 'then', 'that',
-    'this', 'these', 'those', 'what', 'which', 'who', 'where', 'when', 'why', 'how',
-    'please', 'thanks', 'want', 'need', 'like'
-  ]);
-
-  const words = message.toLowerCase().split(/\s+/);
-  const keywords = words.filter(w => w.length > 1 && !stopWords.has(w)); // Allow 2-letter words
-
-  const topic = keywords.length > 0
-    ? keywords.reduce((a, b) => a.length >= b.length ? a : b)
-    : message.slice(0, 30);
-
-  return { action, topic, keywords };
+/** Defines valid parent classes for each node class (in priority order) */
+const CLASS_HIERARCHY: Record<NodeClass, NodeClass[]> = {
+  goal: [],
+  section: ['goal'],
+  subgoal: ['goal', 'section'],
+  task: ['subgoal', 'section', 'goal'],
+  resource: ['task', 'subgoal', 'section'],
+  constraint: ['subgoal', 'task', 'goal', 'section'],
+  metric: ['goal', 'subgoal', 'section'],
+  idea: ['goal', 'subgoal', 'task', 'section'], // Ideas can attach flexibly
 };
-
-const SYSTEM_MESSAGE = `You are a helper.
-Create clear, structured mind maps.
-Use bullet points for details.
-Keep responses concise.`;
-
-const buildFirstTurnUserMessage = (goal: string): string => {
-  return `Goal: ${goal}
-
-Create a comprehensive mind map with 8-10 main topics to cover this goal.
-Use specific, real details.
-
-Reply format:
-MESSAGE: Brief introduction.
-TOPIC1: Topic Name|Description
-...
-TOPIC10: Topic Name|Description
-OPTIONS: Topic1, Topic2, Topic3`;
-};
-
-const buildMainTurnUserMessage = (
-  goal: string,
-  lastUserMessage: string,
-  conversationSummary: string,
-  leafNodes: string,
-  existingLabels: string
-): string => {
-  const intent = extractUserIntent(lastUserMessage);
-
-  return `Context: "${goal}"
-
-USER REQUEST: "${lastUserMessage}"
-KEYWORDS: ${intent.keywords.join(', ') || 'general'}
-Existing nodes: ${existingLabels}
-
-TASK:
-1. Find relevant existing nodes for these keywords.
-2. Create new nodes with specific content.
-3. If addressing multiple existing nodes, specify PARENT before each group.
-
-Reply format:
-MESSAGE: Brief response
-PARENT: [Related Node A]
-NEWTOPIC: Name|Description • Detail 1
-PARENT: [Related Node B]
-NEWTOPIC: Name|Description • Detail 1
-OPTIONS: [New Node Names]
-
-EXAMPLE:
-User: "Add more details"
-PARENT: Category A
-NEWTOPIC: Item 1|Description • Detail
-NEWTOPIC: Item 2|Description • Detail
-OPTIONS: Item 1, Item 2
-
-RULES:
-- PARENT must be an existing node name
-- Repeat PARENT to switch context
-- Use "•" for bullets`;
-};
-
 
 /**
- * V50: Parse text format into JSON structure - Supports Multiple Parents
+ * Checks if a parent class is valid for a given child class.
  */
-export const parseAIResponse = (response: string, goal: string, existingNodes: any[], newNodeId: string, defaultParentId: string, lastUserMessage: string) => {
-  const lines = response.split('\n').filter(l => l.trim());
+function isValidParentClass(childClass: NodeClass, parentClass: NodeClass): boolean {
+  const validParents = CLASS_HIERARCHY[childClass];
+  if (validParents.length === 0) return true; // Root-level classes
+  return validParents.includes(parentClass);
+}
 
-  let message = `Here's your plan for ${goal}. Click any topic or type to expand.`;
-  // V50: Store parent preference with each topic
-  const topics: { name: string, desc: string, preferredParent?: string }[] = [];
-  let options: string[] = [];
-  let currentParentName = "";
+/**
+ * Calculates compatibility score between child and parent classes.
+ * Higher score = better match.
+ */
+function getClassCompatibilityScore(childClass: NodeClass, parentClass: NodeClass): number {
+  const validParents = CLASS_HIERARCHY[childClass];
+  if (validParents.length === 0) return 0.5;
 
-  for (const line of lines) {
-    if (line.startsWith('MESSAGE:')) {
-      message = line.replace('MESSAGE:', '').trim();
-    } else if (line.startsWith('QUESTION:')) {
-      message = line.replace('QUESTION:', '').trim();
-    } else if (line.startsWith('PARENT:')) {
-      currentParentName = line.replace('PARENT:', '').trim();
-    } else if (line.startsWith('TOPIC') || line.startsWith('NEWTOPIC')) {
-      const content = line.replace(/^(TOPIC\d?|NEWTOPIC):?\s*/, '');
-      let [name, desc] = content.split('|').map(s => s.trim());
-      name = name.replace(/^\[|\]$/g, '').trim();
-      desc = (desc || name).replace(/^\[|\]$/g, '').trim();
-      if (name && name.length > 0) {
-        topics.push({ name, desc, preferredParent: currentParentName });
-      }
-    } else if (line.startsWith('OPTIONS:')) {
-      options = line.replace('OPTIONS:', '').split(',')
-        .map(s => s.trim().replace(/^\[|\]$/g, ''))
-        .filter(s => s && s.length > 0);
+  const index = validParents.indexOf(parentClass);
+  if (index === -1) return 0;
+
+  // First in list = best match (1.0), decreasing priority
+  return 1.0 - (index * 0.2);
+}
+
+// ============================================================================
+// CLASS INFERENCE - Keyword-based classification
+// ============================================================================
+
+/** Keywords that suggest specific node classes */
+const CLASS_INFERENCE_RULES: Record<NodeClass, RegExp> = {
+  constraint: /\b(deadline|limit|must|rule|requirement|policy|restriction|budget|cannot|won't|limitation)\b/i,
+  metric: /\b(measure|kpi|percentage|rate|score|count|target|benchmark|track|monitor|success criteria)\b/i,
+  resource: /\b(tool|person|team|budget|money|software|platform|service|api|developer|hire|partner)\b/i,
+  task: /\b(setup|create|build|implement|design|write|develop|deploy|test|configure|install|integrate)\b/i,
+  subgoal: /\b(phase|milestone|stage|objective|component|module|part|area)\b/i,
+  section: /\b(section|quadrant|domain|bucket|category|group|division|department)\b/i,
+  goal: /\b(launch|achieve|complete|finish|deliver|ship|release|accomplish|succeed)\b/i,
+  idea: /\b(maybe|could|might|consider|explore|investigate|research|experiment)\b/i,
+};
+
+/**
+ * Infers node class from label text using keyword patterns.
+ */
+function inferClassFromLabel(label: string): NodeClass {
+  // Use explicit priority order (Fix #26)
+  const priorityOrder: NodeClass[] = [
+    'constraint',
+    'metric',
+    'resource',
+    'task',
+    'subgoal',
+    'section',
+    'goal',
+    'idea'
+  ];
+
+  for (const nodeClass of priorityOrder) {
+    const pattern = CLASS_INFERENCE_RULES[nodeClass];
+    if (pattern.test(label)) {
+      return nodeClass;
+    }
+  }
+  return 'idea'; // Default fallback
+}
+
+// ============================================================================
+// SITUATION DETECTION - Classify user intent
+// ============================================================================
+
+/** Patterns for detecting planning context from user message */
+const CONTEXT_PATTERNS: Record<PlanningContext, RegExp> = {
+  problem_solving: /\b(problem|issue|struggle|stuck|failing|not working|low|poor|bad|broken|wrong|error|bug)\b/i,
+  decision_making: /\b(should i|which|choose|decide|option|vs\.?|versus|or|between|compare|better|prefer)\b/i,
+  brainstorming: /\b(ideas?|suggestions?|ways to|how can|possibilities|alternatives|options|what could)\b/i,
+  refinement: /\b(improve|better|enhance|optimize|refine|iterate|change|modify|update|evolve)\b/i,
+  execution: /\b(steps|how to|implement|build|create|start|begin|execute|do|action|next|plan)\b/i,
+  validation: /\b(validate|verify|check|test|confirm|ensure|assumption|hypothesis|prove|evidence)\b/i,
+  new_project: /^$/,  // Empty - handled separately for first turn
+  general: /^$/,      // Fallback - handled in function
+};
+
+/**
+ * Detects the planning context from user message to apply appropriate framework.
+ */
+function detectPlanningContext(message: string, isFirstTurn: boolean): PlanningContext {
+  if (isFirstTurn) return 'new_project';
+
+  const trimmedMessage = message.trim().toLowerCase();
+
+  // Check patterns in priority order (most specific first)
+  const priorityOrder: PlanningContext[] = [
+    'validation',
+    'problem_solving',
+    'decision_making',
+    'refinement',
+    'brainstorming',
+    'execution',
+  ];
+
+  for (const context of priorityOrder) {
+    if (CONTEXT_PATTERNS[context].test(trimmedMessage)) {
+      return context;
     }
   }
 
-  const isFirstTurn = existingNodes.length === 0;
+  return 'general';
+}
 
-  if (isFirstTurn) {
-    // V50: First turn - create comprehensive structure (8+ topics)
-    const nodes = [
-      { id: "root", label: goal.slice(0, 30), description: goal },
-      ...topics.map((t, i) => ({
-        id: `aspect-${i + 1}`,
-        label: t.name,
-        description: t.desc
-      }))
-    ];
-    // Connect all to root
-    const edges = topics.map((_, i) => ({
-      source: "root",
-      target: `aspect-${i + 1}`
-    }));
+// ============================================================================
+// DESIGN THINKING FRAMEWORK LIBRARY
+// Each framework provides context-specific guidance for the AI
+// ============================================================================
 
-    return {
-      assistantResponse: message,
-      updatedMindMap: { nodes, edges },
-      suggestions: options.length > 0 ? options : topics.slice(0, 3).map(t => t.name)
-    };
-  } else {
-    // V50: Mass Update Support - Resolve parent for EACH topic
-    const timestamp = Date.now();
-    const newNodes: any[] = [];
-    const newEdges: any[] = [];
+interface FrameworkGuidance {
+  name: string;
+  description: string;
+  guidance: string;
+}
 
-    // V51: Contextual Anchor Selection Algorithm
-    // Step 1: Identify Candidates & Focus
-    const rootNode = existingNodes.find(n => n.id.includes('root') || existingNodes.indexOf(n) === 0);
-    const rootId = rootNode?.id;
+const FRAMEWORK_LIBRARY: Record<PlanningContext, FrameworkGuidance> = {
+  new_project: {
+    name: "Empathy & Discovery",
+    description: "Understand who benefits and what problems they face",
+    guidance: `
+APPLY EMPATHY FRAMEWORK:
+- First ask WHO this is for. Don't accept vague answers.
+- Probe for: their context, daily frustrations, current workarounds
+- Understand: What do they see, hear, think, and feel about this problem?
+- Only after understanding the user, explore solutions.
+- Create initial structure: Target User → Problem → Solution Approach`
+  },
 
-    // Helper: Parse timestamp from ID (node-TIMESTAMP-index)
-    const getTimestamp = (id: string) => {
-      const match = id.match(/node-(\d+)-/);
-      return match ? parseInt(match[1]) : 0;
-    };
+  problem_solving: {
+    name: "Root Cause Analysis",
+    description: "Dig deeper to find the real problem before solving",
+    guidance: `
+APPLY ROOT CAUSE (5 WHYS) FRAMEWORK:
+- The user stated a problem. Don't jump to solutions.
+- Ask "why" repeatedly to dig to the root cause.
+- Challenge: Is this the real problem or just a symptom?
+- Validate: What evidence suggests this is the core issue?
+- Only after finding root cause, propose targeted solutions.`
+  },
 
-    // Find "Most Recent Node" (Last Resort Fallback) - Exclude Root
-    const sortedByRecency = [...existingNodes]
-      .filter(n => n.id !== rootId)
-      .sort((a, b) => getTimestamp(b.id) - getTimestamp(a.id));
-    const mostRecentNode = sortedByRecency[0];
+  decision_making: {
+    name: "Multi-Perspective Analysis",
+    description: "Consider all angles before recommending",
+    guidance: `
+APPLY SIX PERSPECTIVES FRAMEWORK:
+1. FACTS: What objective information do we have?
+2. FEELINGS: What's your intuition? What excites or worries you?
+3. RISKS: What could go wrong with each option?
+4. BENEFITS: What are the advantages of each?
+5. ALTERNATIVES: Are there options not yet considered?
+6. SYNTHESIS: Based on all perspectives, recommend a path.`
+  },
 
-    // Identify "Current Focus" (passed as defaultParentId)
-    const focusNodeId = defaultParentId !== rootId ? defaultParentId : null;
+  brainstorming: {
+    name: "Divergent Thinking",
+    description: "Generate multiple options before filtering",
+    guidance: `
+APPLY DIVERGENT THINKING FRAMEWORK:
+- Generate 4-6 distinct approaches or ideas
+- Include at least one unconventional option
+- Challenge constraints: "What if [limitation] wasn't a factor?"
+- Don't judge ideas yet - quantity over quality first
+- Let the user react before converging on a direction.`
+  },
 
-    topics.forEach((topic, index) => {
-      let parentId = ""; // Start undefined to force selection logic
+  refinement: {
+    name: "SCAMPER Innovation",
+    description: "Systematically improve existing ideas",
+    guidance: `
+APPLY SCAMPER FRAMEWORK:
+Consider these innovation prompts:
+- SUBSTITUTE: What can be replaced with something else?
+- COMBINE: What can be merged or bundled together?
+- ADAPT: What can be borrowed from other domains?
+- MODIFY: What can be made bigger, smaller, faster, different?
+- PUT TO OTHER USE: How else could this be used?
+- ELIMINATE: What can be removed or simplified?
+- REVERSE: What if we did the opposite?
 
-      // 1. AI Explicit Preference (Highest Priority if valid)
-      if (topic.preferredParent) {
-        const matchingNode = existingNodes.find(n => {
-          const label = (n.data?.label || n.label || "").toLowerCase();
-          return label.includes(topic.preferredParent!.toLowerCase()) || topic.preferredParent!.toLowerCase().includes(label);
-        });
-        if (matchingNode) {
-          parentId = matchingNode.id;
-        }
-      }
+Suggest 2-3 SCAMPER-inspired improvements.`
+  },
 
-      // 2. Semantic Scoring (If no AI Preference found)
-      if (!parentId) {
-        let bestScore = 0.0;
-        let bestMatch = null;
+  execution: {
+    name: "Journey & Task Breakdown",
+    description: "Structure work into actionable stages",
+    guidance: `
+APPLY JOURNEY THINKING FRAMEWORK:
+- Break down into sequential stages
+- For each stage: What happens? Who does it? How long?
+- Consider dependencies: What must come first?
+- Include validation points: How will we know it's working?
+- Add milestones and metrics where appropriate.`
+  },
 
-        const searchPhrase = (lastUserMessage + " " + topic.name).toLowerCase();
-        const searchTokens = searchPhrase.split(/\s+/).filter(t => t.length > 1); // Allow short words
+  validation: {
+    name: "Assumption Testing",
+    description: "Identify and validate key assumptions",
+    guidance: `
+APPLY VALIDATION (OIOR) FRAMEWORK:
+- OBSERVE: What assumptions are we making?
+- IDEATE: How could we test each assumption cheaply?
+- OBSERVE: What evidence would prove/disprove it?
+- REFLECT: What did we learn? What should change?
 
-        for (const node of existingNodes) {
-          // Skip root for semantic matching unless explicit? (User says forbid connecting to root by default)
-          if (node.id === rootId) continue;
+Help identify the riskiest assumptions and suggest validation approaches.`
+  },
 
-          const label = (node.data?.label || node.label || "").toLowerCase();
-          const nodeTokens = label.split(/\s+/);
-
-          // V53: Weighted Scoring (Exact > Partial)
-          let matchScore = 0;
-          for (const token of searchTokens) {
-            for (const nt of nodeTokens) {
-              if (nt === token) {
-                matchScore += 1.0; // Exact match
-              } else if (token.length > 3 && nt.includes(token)) {
-                matchScore += 0.5; // Partial match (only if token is significant)
-              }
-            }
-          }
-
-          // Normalize score
-          const score = searchTokens.length > 0 ? (matchScore / searchTokens.length) : 0;
-
-          if (score > bestScore) {
-            bestScore = score;
-            bestMatch = node;
-          }
-        }
-
-        // Step 3: Choose Anchor
-        if (bestMatch && bestScore > 0.35) {
-          parentId = bestMatch.id; // Semantic Winner
-        } else {
-          // Step 4: Fallback (Score <= 0.35)
-          // "If no node scores above 0.35, use the most recently created or most recently interacted node."
-
-          if (focusNodeId) {
-            parentId = focusNodeId; // Primary Fallback: Current Focus
-          } else if (mostRecentNode) {
-            parentId = mostRecentNode.id; // Secondary Fallback: Last created
-          } else {
-            parentId = rootId || defaultParentId; // Absolute Last Resort: Root
-          }
-        }
-      }
-      // Safety check
-      if (!parentId) parentId = rootId || defaultParentId;
-
-      // Create Node
-      const nodeId = `node-${timestamp}-${index}-new`; // unique suffix
-      newNodes.push({
-        id: nodeId,
-        label: topic.name,
-        description: topic.desc
-      });
-
-      // Create Edge
-      newEdges.push({
-        source: parentId,
-        target: nodeId
-      });
-    });
-
-    // Fallback: If no topics parsed, create one from user message (legacy)
-    if (newNodes.length === 0) {
-      newNodes.push({
-        id: newNodeId,
-        label: lastUserMessage || "New Topic",
-        description: `Details about ${lastUserMessage}`
-      });
-      newEdges.push({ source: defaultParentId, target: newNodeId });
-    }
-
-    return {
-      assistantResponse: message,
-      updatedMindMap: { nodes: newNodes, edges: newEdges },
-      suggestions: options
-    };
+  general: {
+    name: "Adaptive Guidance",
+    description: "Apply the most relevant framework based on context",
+    guidance: `
+APPLY GENERAL DESIGN THINKING:
+- Look for gaps in the current plan
+- Ask clarifying questions if intent is unclear
+- Challenge assumptions gently
+- Suggest structure where it's missing
+- Consider: What's the next most important question to answer?`
   }
 };
 
 // ============================================================================
-// AI SERVICE
+// SYSTEM PROMPT - Core AI behavior
+// ============================================================================
+
+const SYSTEM_MESSAGE = `You are an action-oriented planning assistant. You help break goals into a structured, visual project plan.
+
+RULES:
+1. Always address the user as "you" — never say "the user".
+2. Your response MUST consist of two parts: a brief conversational message (max 2 sentences), and a code block containing the mind map data.
+3. The mind map data must strictly be inside a \`\`\`mindmap code block.
+4. Define nodes using the exact format: NodeID[Type|Class|Label|Description]
+   - NodeID: Unique alphanumeric string (e.g., G1, SEC1, T1)
+   - Type: MUST be exactly one of: expandable, question, checklist, metric. Default to 'expandable'. ONLY use 'checklist' if the user explicitly asks for steps/procedures. ONLY use 'metric' for measurable numbers.
+   - Class: MUST be exactly one of: goal, section, subgoal, task, resource, constraint, metric, idea. Use 'section' for broad areas of work.
+   - Label: The text label for the node. Keep it concise (max 5 words).
+   - Description: A 1-2 sentence detailed explanation of the node's purpose. MUST NOT BE EMPTY.
+5. For checklist nodes, ALWAYS add an ITEMS line on the very next line: ITEMS: item1 | item2 | item3
+   Pre-fill 3-6 actionable checklist items relevant to the node's purpose.
+6. Define connections between nodes: SourceID --> TargetID
+7. You MUST output at least 2 new nodes per response, unless you emit SWITCH_SECTION.
+8. NEVER output placeholder text or bracket templates.
+9. NEVER mention internal frameworks, node types, or map syntax in your conversational message. Keep the chat natural and human.
+10. If the request clearly belongs in a different existing section, output:
+    SWITCH_SECTION: <Exact Section Label> | <short reason>
+    In this case, do not add new nodes in the mindmap block.
+
+EXAMPLE OUTPUT:
+Great! Let's structure your fitness app project. Here is the initial breakdown:
+\`\`\`mindmap
+G1[expandable|goal|Launch MVP Fitness App|Create a minimum viable product for a fitness application to test market fit.]
+SEC1[expandable|section|Design & UX|Focus on user experience and visual interface design.]
+SEC2[expandable|section|Development|Core engineering and backend infrastructure.]
+T1[checklist|task|Create wireframes|Draft the initial low-fidelity wireframes for the main user flow.]
+ITEMS: Sketch homepage layout | Design onboarding flow | Map user journey | Create component library
+G1 --> SEC1
+G1 --> SEC2
+SEC1 --> T1
+\`\`\``;
+
+// ============================================================================
+// PROMPT BUILDERS
+// ============================================================================
+
+/**
+ * Builds the first turn prompt focused on empathy and discovery.
+ */
+function buildFirstTurnPrompt(goal: string): string {
+  return `GOAL: "${goal}"
+
+Please begin by creating a structured initial visual project plan divided into broad, distinct sections.
+Follow the core rules: 
+1. Create 1 ROOT node (Class: goal) that represents the core objective.
+2. Create 6-8 SECTION nodes (Class: section) connected directly to the root.
+3. Sections must be non-overlapping and strategic (no generic catch-all like "Misc" or "General").
+4. For EACH section node, create 2-3 focused child nodes (Class: task, resource, metric, or constraint).
+5. Include at least 2 metrics and at least 2 constraints overall.
+6. Prioritize high-leverage planning nodes: stakeholders, scope, milestones, risks, dependencies, budget/resources, success criteria.
+7. Avoid niche trivia, low-impact implementation details, or tool-name-only nodes.
+8. Keep the first map performant: target 22-32 nodes total with meaningful hierarchy.`;
+}
+
+function extractSectionContext(userMessage: string): { sectionLabel: string | null; cleanedMessage: string } {
+  const match = userMessage.match(/^\[Section:\s*([^\]]+)\]\s*/i);
+  if (!match) {
+    return { sectionLabel: null, cleanedMessage: userMessage };
+  }
+  return {
+    sectionLabel: match[1].trim(),
+    cleanedMessage: userMessage.replace(match[0], '').trim(),
+  };
+}
+
+function extractKnownSections(existingNodeLabels: string): string[] {
+  if (!existingNodeLabels) return [];
+  const matches = [...existingNodeLabels.matchAll(/^[^\n]*\[[^\]|]*\|section\]\s+(.+)$/gim)];
+  return matches
+    .map((m) => m[1].trim())
+    .filter((label) => label.length > 0);
+}
+
+/**
+ * Builds subsequent turn prompts with context-aware framework guidance.
+ */
+function buildContextualPrompt(
+  goal: string,
+  userMessage: string,
+  existingNodeLabels: string,
+  context: PlanningContext
+): string {
+  // Inject the framework guidance so the AI actually uses it (Fix #27)
+  const framework = FRAMEWORK_LIBRARY[context];
+  const { sectionLabel, cleanedMessage } = extractSectionContext(userMessage);
+  const knownSections = extractKnownSections(existingNodeLabels);
+  const knownSectionInstruction = knownSections.length > 0
+    ? `KNOWN SECTIONS: ${knownSections.join(' | ')}`
+    : '';
+  const sectionInstruction = sectionLabel
+    ? `SECTION FOCUS: "${sectionLabel}"
+- You are currently expanding this section.
+- Find the existing section node ID whose label matches "${sectionLabel}" in CURRENT MAP CONTEXT.
+- Attach new nodes under that section node unless the user explicitly asks otherwise.
+- If the user asks for work that clearly belongs in another KNOWN SECTION, emit:
+  SWITCH_SECTION: <Exact Section Label> | <short reason>
+- If you emit SWITCH_SECTION, do not add any nodes.
+`
+    : '';
+
+  return `GOAL: "${goal}"
+
+CURRENT MAP CONTEXT:
+${existingNodeLabels || "(none)"}
+
+${knownSectionInstruction}
+${framework.guidance}
+${sectionInstruction}
+
+USER APPLIES TO YOU: "${cleanedMessage}"
+
+Rules for the mindmap code block:
+- Create 2-4 new nodes that expand the map based on the user's message.
+- You MUST connect each new node from an EXISTING source node ID in CURRENT MAP CONTEXT.
+- Never invent source IDs that are not present in CURRENT MAP CONTEXT.
+- Do NOT recreate existing nodes.
+- Only output the NEW nodes and the NEW edges.
+- Prefer section-scoped additions: if sections exist, avoid attaching non-section nodes directly to goal.
+- Keep labels concrete and specific. Avoid vague labels like "Improve Plan", "General Ideas", or "Misc".
+- Include at least one concrete execution node (task/resource/metric/constraint) unless the user explicitly asks for pure ideation.
+- Descriptions must state why this node matters for the active section or goal.
+- Remember the exact format: NodeID[Type|Class|Label|Description]`;
+}
+
+// ============================================================================
+// RESPONSE PARSER - Robust extraction with validation
+// ============================================================================
+
+/**
+ * Validates and normalizes a node type string.
+ */
+function validateNodeType(typeStr: string): NodeType {
+  const normalized = typeStr.toLowerCase().trim();
+  const validTypes: NodeType[] = ['expandable', 'question', 'checklist', 'metric'];
+
+  if (validTypes.includes(normalized as NodeType)) {
+    return normalized as NodeType;
+  }
+  return 'expandable'; // Default fallback
+}
+
+/**
+ * Validates and normalizes a node class string.
+ */
+function validateNodeClass(classStr: string): NodeClass {
+  const normalized = classStr.toLowerCase().trim();
+  const validClasses: NodeClass[] = ['goal', 'section', 'subgoal', 'task', 'resource', 'constraint', 'metric', 'idea'];
+
+  if (validClasses.includes(normalized as NodeClass)) {
+    return normalized as NodeClass;
+  }
+  return 'idea'; // Default fallback
+}
+
+function inferNodeType(
+  explicitType: string,
+  nodeClass: NodeClass,
+  label: string,
+  description: string,
+  hasItems: boolean
+): NodeType {
+  const explicit = validateNodeType(explicitType);
+  if (explicitType && ['expandable', 'question', 'checklist', 'metric'].includes(explicitType.toLowerCase().trim())) {
+    return explicit;
+  }
+
+  const normalizedLabel = label.toLowerCase().trim();
+  const normalizedDescription = description.toLowerCase().trim();
+
+  if (nodeClass === 'metric') return 'metric';
+  if (hasItems || nodeClass === 'task') return 'checklist';
+  if (
+    normalizedLabel.endsWith('?') ||
+    /^(how|what|why|which|who|where|when)\b/i.test(normalizedLabel) ||
+    /question|unknown|clarify/.test(normalizedDescription)
+  ) {
+    return 'question';
+  }
+  return explicit;
+}
+
+function buildDefaultChecklistItems(label: string): { id: string; text: string; completed: boolean }[] {
+  const seed = label.trim() || 'this workstream';
+  return [
+    { id: `item-${Date.now()}-0`, text: `Define scope and success criteria for ${seed}`, completed: false },
+    { id: `item-${Date.now()}-1`, text: `Execute core activities for ${seed}`, completed: false },
+    { id: `item-${Date.now()}-2`, text: `Review results and iterate for ${seed}`, completed: false },
+  ];
+}
+
+/**
+ * Parses AI response into structured format for mind map updates.
+ */
+export function parseAIResponse(
+  response: string,
+  goal: string,
+  existingNodes: MindMapNode[],
+  newNodeId: string,
+  defaultParentId: string,
+  lastUserMessage: string
+): ParsedAIResponse {
+  const normalizeLabelKey = (value: string) =>
+    value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+  const resolveRedirectSection = (rawLabel: string): string | undefined => {
+    const sectionLabels = existingNodes
+      .filter((n) => n.nodeClass === 'section')
+      .map((n) => n.label.trim())
+      .filter((label) => label.length > 0);
+
+    if (sectionLabels.length === 0) return undefined;
+    if (!rawLabel) return undefined;
+
+    const normalizedWanted = normalizeLabelKey(rawLabel);
+    const exact = sectionLabels.find((label) => normalizeLabelKey(label) === normalizedWanted);
+    if (exact) return exact;
+
+    const contains = sectionLabels.find((label) =>
+      normalizeLabelKey(label).includes(normalizedWanted) || normalizedWanted.includes(normalizeLabelKey(label))
+    );
+
+    return contains;
+  };
+
+  const switchMatch = response.match(/^\s*SWITCH_SECTION:\s*(.+)$/im);
+  const switchPayload = switchMatch?.[1]?.trim() || '';
+  const [rawRedirectLabel, rawRedirectReason] = switchPayload
+    ? switchPayload.split('|', 2).map((part) => part.trim())
+    : ['', ''];
+  const redirectTo = resolveRedirectSection(rawRedirectLabel);
+  const redirectReason = rawRedirectReason || undefined;
+
+  // 1. Extract conversational message and mindmap block
+  const mindmapMatch = response.match(/\`\`\`(?:mindmap)?\n([\s\S]*?)\`\`\`/i);
+  let mindmapText = '';
+  let assistantResponse = response;
+
+  if (mindmapMatch) {
+    mindmapText = mindmapMatch[1];
+    // Remove the entire code block including backticks from the conversational response
+    assistantResponse = response.replace(mindmapMatch[0], '');
+  } else {
+    // If no block, perhaps the AI just output the map without backticks. Try to salvage.
+    mindmapText = response;
+    assistantResponse = "I've updated the map based on your input.";
+  }
+
+  // Aggressively clean the conversational response from leaked map syntax
+  assistantResponse = assistantResponse
+    .replace(/^[A-Z0-9_-]+\s*-->\s*[A-Z0-9_-]+.*$/gm, '') // Strip edge definitions
+    .replace(/^[A-Z0-9_-]+\[.*?\|.*?\|.*?\].*$/gm, '') // Strip node definitions
+    .replace(/^\s*SWITCH_SECTION:\s*.+$/gim, '') // Strip redirect directives
+    .replace(/EXISTING_ID(?:_[0-9]+)?/g, '') // Strip generic placeholders
+    .trim();
+
+  // Fallback for empty message after cleaning
+  if (!assistantResponse) {
+    assistantResponse = redirectTo
+      ? `This belongs in "${redirectTo}".`
+      : "I've updated your plan with these new additions.";
+  }
+
+  const newNodes: MindMapNode[] = [];
+  const newEdges: MindMapEdge[] = [];
+  const existingNodeIds = new Set(existingNodes.map(n => n.id));
+
+  // 2. Parse nodes and edges from the text
+  const lines = mindmapText.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+
+    // Node: ID[type|class|label|description]
+    // Use a more lenient regex that tolerates trailing junk after the closing bracket
+    const nodeMatch = line.match(/^([A-Z0-9_-]+)\[([^|]+)\|([^|]+)\|([^|\]]+)(?:\|([^\]]*))?\]/i);
+    if (nodeMatch) {
+      const id = nodeMatch[1].trim();
+
+      // Collision protection - don't overwrite existing nodes
+      if (existingNodeIds.has(id)) {
+        console.warn(`[Parser] Skipping duplicate node ID: ${id}`);
+        continue;
+      }
+
+      // Clean description to strip any leaked mindmap syntax
+      let description = (nodeMatch[5] || '').trim();
+      if (!description) description = `Details for: ${nodeMatch[4].trim()}`;
+      // Strip patterns like " --> T2" or "[task" from leaked map syntax  
+      description = description.replace(/\s*[-–→]+\s*[A-Z0-9_-]+.*$/i, '').trim();
+      description = description.replace(/\[[^\]]*$/i, '').trim(); // Remove unclosed brackets
+
+      const label = nodeMatch[4].trim();
+      const rawClass = nodeMatch[3].trim();
+      let resolvedClass = validateNodeClass(rawClass);
+      if (resolvedClass === 'idea' && rawClass.toLowerCase() !== 'idea') {
+        resolvedClass = inferClassFromLabel(`${label} ${description} ${rawClass}`);
+      }
+
+      const nodeData: MindMapNode = {
+        id,
+        nodeType: 'expandable',
+        nodeClass: resolvedClass,
+        label,
+        description,
+      };
+
+      // Check for ITEMS: pre-fill on subsequent lines
+      if (i + 1 < lines.length) {
+        const nextLine = lines[i + 1].trim();
+        const itemsMatch = nextLine.match(/^ITEMS:\s*(.+)/i);
+        if (itemsMatch) {
+          nodeData.items = itemsMatch[1].split('|').map((text: string, idx: number) => ({
+            id: `item-${Date.now()}-${idx}`,
+            text: text.trim(),
+            completed: false,
+          })).filter((item: { text: string }) => item.text.length > 0);
+          i++; // Skip the ITEMS line in next iteration
+        }
+      }
+
+      nodeData.nodeType = inferNodeType(
+        nodeMatch[2],
+        nodeData.nodeClass,
+        nodeData.label,
+        nodeData.description,
+        !!(nodeData.items && nodeData.items.length > 0)
+      );
+
+      if (nodeData.nodeType === 'checklist' && (!nodeData.items || nodeData.items.length === 0)) {
+        nodeData.items = buildDefaultChecklistItems(nodeData.label);
+      }
+
+      newNodes.push(nodeData);
+      continue;
+    }
+
+    // Edge: SourceID --> TargetID (lenient — strip trailing junk)
+    const edgeMatch = line.match(/^([A-Z0-9_-]+)\s*-->\s*([A-Z0-9_-]+)/i);
+    if (edgeMatch) {
+      newEdges.push({
+        source: edgeMatch[1].trim(),
+        target: edgeMatch[2].trim()
+      });
+      continue;
+    }
+  }
+
+  // 3. Graceful fallback if parser completely failed (e.g. AI hallucinated hard)
+  if (!redirectTo && newNodes.length === 0 && existingNodes.length > 0 && lastUserMessage) {
+    newNodes.push({
+      id: newNodeId, // Provided by the UI layer as fallback ID
+      label: lastUserMessage.slice(0, 40),
+      description: lastUserMessage,
+      nodeClass: 'idea'
+    });
+    newEdges.push({ source: defaultParentId, target: newNodeId });
+  } else if (!redirectTo && newNodes.length === 0 && existingNodes.length === 0) {
+    newNodes.push({
+      id: "root",
+      label: goal.slice(0, 40),
+      description: goal,
+      nodeClass: 'goal'
+    });
+  }
+
+  console.log('[Parser] Resolved Nodes:', newNodes);
+  console.log('[Parser] Resolved Edges:', newEdges);
+
+  return {
+    assistantResponse,
+    updatedMindMap: { nodes: newNodes, edges: newEdges },
+    suggestions: [], // Deprecated OPTIONS feature
+    redirectTo,
+    redirectReason
+  };
+}
+
+// ============================================================================
+// AI SERVICE - Singleton pattern for model management
 // ============================================================================
 
 export class AIService {
   private static instance: AIService;
   private enginePromise: Promise<MLCEngine> | null = null;
-  private currentModelId: string = SELECTED_MODEL;
+  private currentModelId: string = selectedModelId;
 
   private constructor() { }
 
+  /**
+   * Gets the singleton instance of AIService.
+   */
   public static getInstance(): AIService {
     if (!AIService.instance) {
       AIService.instance = new AIService();
@@ -328,25 +751,36 @@ export class AIService {
     return AIService.instance;
   }
 
+  /**
+   * Returns the currently selected model ID.
+   */
   public getCurrentModel(): string {
     return this.currentModelId;
   }
 
-  public async switchModel(modelSize: ModelSize, onProgress?: InitProgressCallback): Promise<void> {
+  /**
+   * Switches to a different model size.
+   */
+  public async switchModel(
+    modelSize: ModelSize,
+    onProgress?: InitProgressCallback
+  ): Promise<void> {
     const newModelId = MODEL_OPTIONS[modelSize].id;
+
     if (newModelId === this.currentModelId && this.enginePromise) {
       return; // Already loaded
     }
 
-    // Clear existing engine
     this.enginePromise = null;
     this.currentModelId = newModelId;
-    SELECTED_MODEL = newModelId;
+    selectedModelId = newModelId;
 
-    // Pre-load the new model
     await this.getEngine(onProgress);
   }
 
+  /**
+   * Gets or initializes the LLM engine.
+   */
   public async getEngine(onProgress?: InitProgressCallback): Promise<MLCEngine> {
     if (this.enginePromise) {
       return this.enginePromise;
@@ -360,74 +794,140 @@ export class AIService {
     return this.enginePromise;
   }
 
+  /**
+   * Returns mode-specific guidance for the AI based on thinking mode.
+   */
+  private getModeGuidance(mode: 'explore' | 'analyze' | 'create' | 'execute'): string {
+    const guidance: Record<string, string> = {
+      explore: `EXPLORE MODE ACTIVE:
+- Ask open-ended questions to understand the problem space
+- Encourage divergent thinking - accept all ideas without judgment
+- Focus on WHO benefits and WHAT problems exist
+- Be curious and empathetic`,
+
+      analyze: `ANALYZE MODE ACTIVE:
+- Apply root cause analysis - ask WHY repeatedly
+- Challenge assumptions and identify gaps
+- Look for risks and dependencies
+- Be structured and critical`,
+
+      create: `CREATE MODE ACTIVE:
+- Generate multiple alternative approaches
+- Use SCAMPER thinking (Substitute, Combine, Adapt, Modify, Put to other use, Eliminate, Reverse)
+- Challenge constraints creatively
+- Be innovative and playful`,
+
+      execute: `EXECUTE MODE ACTIVE:
+- Break work into concrete, actionable tasks
+- Add deadlines, milestones, and owners
+- Consider dependencies and sequence
+- Be specific and practical`
+    };
+
+    return guidance[mode] || guidance.explore;
+  }
+
+
+  /**
+   * Sends a chat message to the AI and returns the response.
+   * @param initialGoal - The user's main goal
+   * @param chatHistory - Conversation history
+   * @param currentMindMapJSON - Current mind map state as JSON
+   * @param thinkingMode - Current thinking mode (explore/analyze/create/execute)
+   * @param onProgress - Optional progress callback
+   */
   public async chat(
     initialGoal: string,
-    chatHistory: { role: string; content: string }[],
+    chatHistory: ChatMessage[],
     currentMindMapJSON: string,
-    onProgress?: InitProgressCallback
-  ) {
+    thinkingMode?: 'explore' | 'analyze' | 'create' | 'execute',
+    onProgress?: InitProgressCallback,
+    options?: { forceContextual?: boolean }
+  ): Promise<string> {
     const engine = await this.getEngine(onProgress);
 
-    const isFirstTurn = chatHistory.length <= 1;
+    const isFirstTurn = !options?.forceContextual && chatHistory.length <= 1;
+    const lastUserMsg = chatHistory[chatHistory.length - 1]?.content || "";
+    const planningContext = detectPlanningContext(lastUserMsg, isFirstTurn);
 
-    // V39: Build messages array with system + user messages
-    const messages: { role: string; content: string }[] = [
-      { role: "system", content: SYSTEM_MESSAGE }
+    // Get mode-specific guidance
+    const modeGuidance = this.getModeGuidance(thinkingMode || 'explore');
+
+    // Build messages array with mode-enhanced system prompt
+    const enhancedSystemMessage = `${SYSTEM_MESSAGE}\n\nCURRENT MODE: ${(thinkingMode || 'explore').toUpperCase()}\n${modeGuidance}`;
+
+    const messages: ChatMessage[] = [
+      { role: "system", content: enhancedSystemMessage }
     ];
 
     if (isFirstTurn) {
       messages.push({
         role: "user",
-        content: buildFirstTurnUserMessage(initialGoal)
+        content: buildFirstTurnPrompt(initialGoal)
       });
     } else {
-      // V44: Get the last user message
-      const lastUserMsg = chatHistory[chatHistory.length - 1]?.content || "";
-
-      // V44: Limit conversation summary to last 4 messages (context window limit)
-      const recentHistory = chatHistory.slice(-5, -1); // Last 4, excluding current
-      const summary = recentHistory
-        .map(m => `${m.role}: ${m.content.slice(0, 100)}`) // Truncate long messages
-        .join('\n');
-
-      // V43: Find leaf nodes (outermost - nodes that are not sources of any edge)
-      let leafNodeLabels = "root";
-      let existingLabels = "";
-      try {
-        const mapData = JSON.parse(currentMindMapJSON);
-        if (mapData.nodes && mapData.edges) {
-          const sourceIds = new Set(mapData.edges.map((e: any) => e.source));
-          const leafNodes = mapData.nodes.filter((n: any) => !sourceIds.has(n.id));
-          leafNodeLabels = leafNodes.map((n: any) => n.label || n.data?.label).join(', ');
-          // V45: Get all existing labels to prevent duplicates
-          existingLabels = mapData.nodes.map((n: any) => n.label || n.data?.label).join(', ');
-        }
-      } catch (e) {
-        console.warn("Could not parse mind map for leaf nodes");
+      // Include conversation history for context (last 6 messages to fit context window)
+      const recentHistory = chatHistory.slice(-6);
+      for (const msg of recentHistory) {
+        if (msg.role === 'system') continue; // Skip system messages from history
+        messages.push({
+          role: msg.role,
+          content: msg.content
+        });
       }
 
+      const existingLabels = this.extractNodeLabels(currentMindMapJSON);
+
+      // Add the structured prompt as the final user message
       messages.push({
         role: "user",
-        content: buildMainTurnUserMessage(initialGoal, lastUserMsg, summary, leafNodeLabels, existingLabels)
+        content: buildContextualPrompt(
+          initialGoal,
+          lastUserMsg,
+          existingLabels,
+          planningContext
+        )
       });
     }
 
-    console.log("V39 DEBUG: Sending messages:", JSON.stringify(messages, null, 2));
+    console.log(`[AIService] Context: ${planningContext}, History: ${messages.length} msgs`);
 
     const reply = await engine.chat.completions.create({
-      messages: messages as any,
-      temperature: 0.7, // Higher for more creativity, less template copying
-      max_tokens: 400,
-      // V42: No JSON format - using simple text format
+      messages: messages as unknown as Parameters<typeof engine.chat.completions.create>[0]['messages'],
+      temperature: 0.7,
+      max_tokens: 2048,
     });
 
     const response = reply.choices[0].message.content || "";
-    console.log("V39 DEBUG: Raw response:", response);
+    console.log("[AIService] Response:", response.slice(0, 200) + "...");
 
     return response;
   }
+
+  /**
+   * Extracts node labels from mind map JSON for context.
+   */
+  private extractNodeLabels(mindMapJSON: string): string {
+    try {
+      const data = JSON.parse(mindMapJSON);
+      if (data.nodes && Array.isArray(data.nodes)) {
+        return data.nodes
+          .map((n: { id: string; type?: string; data?: { label?: string; nodeClass?: string } }) => {
+            const label = n.data?.label || '';
+            const nodeClass = n.data?.nodeClass || 'idea';
+            const nodeType = n.type || 'expandable';
+            if (!label) return '';
+            return `${n.id}: [${nodeType}|${nodeClass}] ${label}`;
+          })
+          .filter((s: string) => s.length > 0)
+          .join('\n');
+      }
+    } catch {
+      console.warn("[AIService] Could not parse mind map JSON");
+    }
+    return "";
+  }
 }
 
+// Export singleton instance
 export const aiService = AIService.getInstance();
-
-

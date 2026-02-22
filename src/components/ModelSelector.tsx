@@ -62,65 +62,65 @@ export default function ModelSelector() {
         <>
             {/* Loading Overlay */}
             {isLoading && (
-                <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center">
-                    <div className="bg-zinc-900 border border-zinc-700 rounded-2xl p-8 max-w-md w-full mx-4 text-center">
-                        <Loader2 className="w-12 h-12 animate-spin text-indigo-400 mx-auto mb-4" />
-                        <h3 className="text-lg font-semibold text-zinc-100 mb-2">Downloading AI Model</h3>
-                        <p className="text-sm text-zinc-400 mb-4">{loadingText}</p>
-                        <div className="w-full bg-zinc-800 rounded-full h-2">
+                <div className="fixed inset-0 bg-background-light/80 dark:bg-background-dark/80 backdrop-blur-sm z-50 flex items-center justify-center">
+                    <div className="glass rounded-2xl p-8 max-w-md w-full mx-4 text-center shadow-neumorphic dark:shadow-neumorphic-dark">
+                        <Loader2 className="w-12 h-12 animate-spin text-primary mx-auto mb-4" />
+                        <h3 className="text-lg font-semibold text-text-main dark:text-surface-light mb-2">Downloading AI Model</h3>
+                        <p className="text-sm text-text-muted mb-4">{loadingText}</p>
+                        <div className="w-full bg-surface-light dark:bg-surface-dark rounded-full h-2 overflow-hidden input-groove">
                             <div
-                                className="bg-indigo-500 h-2 rounded-full transition-all duration-300"
+                                className="bg-primary h-2 rounded-full transition-all duration-300"
                                 style={{ width: `${loadingProgress * 100}%` }}
                             />
                         </div>
-                        <p className="text-xs text-zinc-500 mt-2">{Math.round(loadingProgress * 100)}%</p>
+                        <p className="text-xs text-text-muted mt-2">{Math.round(loadingProgress * 100)}%</p>
                     </div>
                 </div>
             )}
 
             {/* Confirmation Dialog for 3B */}
             {showConfirm && (
-                <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center">
-                    <div className="bg-zinc-900 border border-zinc-700 rounded-2xl p-6 max-w-md w-full mx-4">
+                <div className="fixed inset-0 bg-background-light/80 dark:bg-background-dark/80 backdrop-blur-sm z-50 flex items-center justify-center">
+                    <div className="glass rounded-2xl p-6 max-w-md w-full mx-4 shadow-neumorphic dark:shadow-neumorphic-dark">
                         <div className="flex items-start gap-3 mb-4">
-                            <AlertTriangle className="w-6 h-6 text-amber-400 shrink-0 mt-0.5" />
+                            <AlertTriangle className="w-6 h-6 text-amber-500 shrink-0 mt-0.5" />
                             <div>
-                                <h3 className="text-lg font-semibold text-zinc-100">Switch to Quality Mode?</h3>
-                                <p className="text-sm text-zinc-400 mt-1">
+                                <h3 className="text-lg font-semibold text-text-main dark:text-surface-light">Switch to Quality Mode?</h3>
+                                <p className="text-sm text-text-muted mt-1">
                                     The 3B model provides better responses but requires more resources.
                                 </p>
                             </div>
                         </div>
 
-                        <div className="bg-zinc-800/50 rounded-lg p-4 mb-4 space-y-2">
+                        <div className="bg-surface-light/50 dark:bg-surface-dark/50 rounded-xl p-4 mb-6 space-y-2 border border-white/20 dark:border-white/5">
                             <div className="flex justify-between text-sm">
-                                <span className="text-zinc-400">Download Size:</span>
-                                <span className="text-amber-400 font-medium">~1.8GB</span>
+                                <span className="text-text-muted">Download Size:</span>
+                                <span className="text-amber-600 dark:text-amber-400 font-medium">~1.8GB</span>
                             </div>
                             <div className="flex justify-between text-sm">
-                                <span className="text-zinc-400">RAM Required:</span>
-                                <span className="text-amber-400 font-medium">~4GB</span>
+                                <span className="text-text-muted">RAM Required:</span>
+                                <span className="text-amber-600 dark:text-amber-400 font-medium">~4GB</span>
                             </div>
                             <div className="flex justify-between text-sm">
-                                <span className="text-zinc-400">First Load:</span>
-                                <span className="text-zinc-300">~40-60 seconds</span>
+                                <span className="text-text-muted">First Load:</span>
+                                <span className="text-text-main dark:text-surface-light">~40-60 seconds</span>
                             </div>
                         </div>
 
-                        <p className="text-xs text-zinc-500 mb-4">
+                        <p className="text-xs text-text-muted mb-6">
                             The model is cached after first download. Subsequent visits will load faster.
                         </p>
 
                         <div className="flex gap-3">
                             <button
                                 onClick={() => setShowConfirm(false)}
-                                className="flex-1 px-4 py-2 bg-zinc-800 text-zinc-300 rounded-lg hover:bg-zinc-700 transition-colors"
+                                className="flex-1 px-4 py-2.5 rounded-xl text-text-muted hover:text-text-main hover:bg-surface-light dark:hover:bg-surface-dark transition-colors font-medium"
                             >
                                 Cancel
                             </button>
                             <button
                                 onClick={confirmSwitch}
-                                className="flex-1 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-500 transition-colors flex items-center justify-center gap-2"
+                                className="flex-1 px-4 py-2.5 bg-primary text-white rounded-xl hover:bg-primary/90 transition-all shadow-lg shadow-primary/25 flex items-center justify-center gap-2 font-medium"
                             >
                                 <Check size={16} />
                                 Continue
@@ -133,25 +133,28 @@ export default function ModelSelector() {
             {/* Settings Button */}
             <button
                 onClick={() => setIsOpen(!isOpen)}
-                className="p-2 bg-zinc-800/80 hover:bg-zinc-700 rounded-lg border border-zinc-700 transition-colors"
+                className="w-10 h-10 neumorphic-btn rounded-full flex items-center justify-center text-text-muted hover:text-primary active:scale-95 transition-all"
                 title="Model Settings"
+                aria-haspopup="listbox"
+                aria-expanded={isOpen}
+                aria-label="Select AI Model"
             >
-                <Settings size={16} className="text-zinc-400" />
+                <Settings size={18} />
             </button>
 
             {/* Dropdown */}
             {isOpen && (
-                <div className="absolute top-full right-0 mt-2 w-64 bg-zinc-900 border border-zinc-700 rounded-xl shadow-xl overflow-hidden z-40">
-                    <div className="p-3 border-b border-zinc-800">
+                <div className="absolute top-12 right-0 mt-2 w-72 glass rounded-2xl shadow-neumorphic dark:shadow-neumorphic-dark overflow-hidden z-40 animate-fade-in">
+                    <div className="p-4 border-b border-white/20 dark:border-white/5 bg-surface-light/30 dark:bg-surface-dark/30">
                         <div className="flex items-center justify-between">
-                            <span className="text-sm font-medium text-zinc-200">AI Model</span>
-                            <button onClick={() => setIsOpen(false)} className="text-zinc-500 hover:text-zinc-300">
-                                <X size={14} />
+                            <span className="text-sm font-bold text-text-main dark:text-surface-light">AI Model Configuration</span>
+                            <button onClick={() => setIsOpen(false)} aria-label="Close Model Configuration" className="text-text-muted hover:text-text-main transition-colors">
+                                <X size={16} />
                             </button>
                         </div>
                     </div>
 
-                    <div className="p-2">
+                    <div className="p-2 space-y-1" role="listbox" aria-label="AI Models">
                         {(Object.keys(MODEL_OPTIONS) as ModelSize[]).map((size) => {
                             const model = MODEL_OPTIONS[size];
                             const isSelected = size === currentModel;
@@ -160,25 +163,28 @@ export default function ModelSelector() {
                                 <button
                                     key={size}
                                     onClick={() => handleModelSelect(size)}
-                                    className={`w-full p-3 rounded-lg text-left transition-colors ${isSelected
-                                        ? 'bg-indigo-600/20 border border-indigo-500/30'
-                                        : 'hover:bg-zinc-800 border border-transparent'
+                                    role="option"
+                                    aria-selected={isSelected}
+                                    className={`w-full p-3 rounded-xl text-left transition-all ${isSelected
+                                        ? 'bg-primary/10 border border-primary/20 shadow-sm'
+                                        : 'hover:bg-surface-light/50 dark:hover:bg-surface-dark/50 border border-transparent'
                                         }`}
                                 >
                                     <div className="flex items-center gap-2 mb-1">
-                                        <Cpu size={14} className={isSelected ? 'text-indigo-400' : 'text-zinc-500'} />
-                                        <span className={`text-sm font-medium ${isSelected ? 'text-indigo-300' : 'text-zinc-200'}`}>
+                                        <Cpu size={16} className={isSelected ? 'text-primary' : 'text-text-muted'} />
+                                        <span className={`text-sm font-bold ${isSelected ? 'text-primary' : 'text-text-main dark:text-surface-light'}`}>
                                             {model.name}
                                         </span>
                                         {isSelected && (
-                                            <span className="ml-auto text-xs bg-indigo-500/20 text-indigo-400 px-2 py-0.5 rounded">
+                                            <span className="ml-auto text-[10px] uppercase tracking-wider bg-primary/20 text-primary px-2 py-0.5 rounded-full font-bold">
                                                 Active
                                             </span>
                                         )}
                                     </div>
-                                    <p className="text-xs text-zinc-500 ml-5">{model.description}</p>
-                                    <p className="text-xs text-zinc-600 ml-5 mt-1">
-                                        {model.downloadSize} • {model.ramRequired} RAM
+                                    <p className="text-xs text-text-muted ml-6 mb-1">{model.description}</p>
+                                    <p className="text-[10px] text-text-muted/70 ml-6 flex items-center gap-2">
+                                        <span className="bg-surface-light dark:bg-surface-dark px-1.5 py-0.5 rounded text-text-main dark:text-surface-light/80">{model.downloadSize}</span>
+                                        <span className="bg-surface-light dark:bg-surface-dark px-1.5 py-0.5 rounded text-text-main dark:text-surface-light/80">{model.ramRequired} RAM</span>
                                     </p>
                                 </button>
                             );
