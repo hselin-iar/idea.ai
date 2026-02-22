@@ -8,8 +8,7 @@ import MindMapBoard from '@/components/MindMap/MindMapBoard';
 import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useAuth } from '@/contexts/AuthContext';
-import { doc, onSnapshot, setDoc } from 'firebase/firestore';
-import { db } from '@/lib/firebase';
+import { saveSession, SessionCore, subscribeToSession } from '@/lib/sessionApi';
 import type { Edge, Node } from '@xyflow/react';
 
 export default function WorkspacePage() {
@@ -83,50 +82,7 @@ export default function WorkspacePage() {
 
         if (user) {
             // Firestore is canonical for signed-in users.
-            const sessionRef = doc(db, 'users', user.uid, 'sessions', id);
-            unsubscribe = onSnapshot(sessionRef, (sessionDoc) => {
-                let nextCore: {
-                    goal: string;
-                    messages: Message[];
-                    nodes: Node[];
-                    edges: Edge[];
-                    sectionBriefs: Record<string, SectionBrief>;
-                    sectionBriefDismissed: Record<string, boolean>;
-                    projectIntake: ProjectIntake | null;
-                    projectIntakePrompted: boolean;
-                    userConstraints: string[];
-                    proposalMode: boolean;
-                };
-                if (sessionDoc.exists()) {
-                    const data = sessionDoc.data();
-                    nextCore = {
-                        goal: data.goal || '',
-                        messages: data.messages || [],
-                        nodes: data.nodes || [],
-                        edges: data.edges || [],
-                        sectionBriefs: data.sectionBriefs || {},
-                        sectionBriefDismissed: data.sectionBriefDismissed || {},
-                        projectIntake: data.projectIntake || null,
-                        projectIntakePrompted: data.projectIntakePrompted ?? false,
-                        userConstraints: data.userConstraints || [],
-                        proposalMode: data.proposalMode ?? true,
-                    };
-                } else {
-                    // New session document: start clean.
-                    nextCore = {
-                        goal: '',
-                        messages: [],
-                        nodes: [],
-                        edges: [],
-                        sectionBriefs: {},
-                        sectionBriefDismissed: {},
-                        projectIntake: null,
-                        projectIntakePrompted: false,
-                        userConstraints: [],
-                        proposalMode: true,
-                    };
-                }
-
+            unsubscribe = subscribeToSession(user.uid, id, (nextCore: SessionCore) => {
                 const serializedCore = serializeSessionCore(nextCore);
                 if (serializedCore !== lastSyncedCoreRef.current) {
                     setSessionData(nextCore);
@@ -137,6 +93,8 @@ export default function WorkspacePage() {
                     isHydratingRef.current = false;
                     markLoaded();
                 }
+            }, (error) => {
+                console.error('[Workspace] failed to load session', error);
             });
         } else {
             // Guest fallback: session-scoped local storage only.
@@ -215,7 +173,7 @@ export default function WorkspacePage() {
                 const previousSyncedCore = lastSyncedCoreRef.current;
                 try {
                     lastSyncedCoreRef.current = serializedCore;
-                    await setDoc(doc(db, 'users', user.uid, 'sessions', id), sessionData, { merge: true });
+                    await saveSession(user.uid, id, sessionData);
                 } catch (e) {
                     lastSyncedCoreRef.current = previousSyncedCore;
                     console.error("Cloud save failed", e);

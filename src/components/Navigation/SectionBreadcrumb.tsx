@@ -1,13 +1,15 @@
 import React from 'react';
-import { ChevronRight, ArrowLeft, Maximize } from 'lucide-react';
+import { ChevronRight, ArrowLeft, Maximize, Sparkles } from 'lucide-react';
 import { useStore } from '@/lib/store';
 
 interface Props {
     isFullView: boolean;
     setIsFullView: (val: boolean) => void;
+    onOptimizeSection: () => void;
+    isOptimizingSection: boolean;
 }
 
-export default function SectionBreadcrumb({ isFullView, setIsFullView }: Props) {
+export default function SectionBreadcrumb({ isFullView, setIsFullView, onOptimizeSection, isOptimizingSection }: Props) {
     const goal = useStore((state) => state.goal);
     const activeSection = useStore((state) => state.activeSection);
     const setActiveSection = useStore((state) => state.setActiveSection);
@@ -42,6 +44,18 @@ export default function SectionBreadcrumb({ isFullView, setIsFullView }: Props) 
                 >
                     <ArrowLeft size={14} />
                     Back to Overview
+                </button>
+            )}
+
+            {activeSection && (
+                <button
+                    onClick={onOptimizeSection}
+                    disabled={isOptimizingSection}
+                    className="flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium transition-all shadow-lg border bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-200 border-emerald-400/30 disabled:opacity-60"
+                    title="Merge redundant nodes, improve node types, and compact this section"
+                >
+                    <Sparkles size={14} />
+                    {isOptimizingSection ? 'Optimizing...' : 'Optimize Section'}
                 </button>
             )}
 

@@ -63,7 +63,8 @@ function actionabilityScore(node: MindMapNode): number {
     const classWeight = ['task', 'resource', 'constraint', 'metric', 'subgoal'].includes(node.nodeClass) ? 0.7 : 0.35;
     const labelTokens = tokenize(`${node.label} ${node.description}`);
     const hasVerb = labelTokens.some((token) => ACTION_VERBS.includes(token));
-    return Math.min(1, classWeight + (hasVerb ? 0.3 : 0));
+    const advancedTypeBonus = ['question', 'decision', 'tradeoff'].includes(node.nodeType || '') ? 0.14 : 0;
+    return Math.min(1, classWeight + (hasVerb ? 0.3 : 0) + advancedTypeBonus);
 }
 
 function cleanChecklistItems(node: MindMapNode): MindMapNode {
@@ -122,19 +123,20 @@ export function applyQualityGate(
         const relevance = relevanceScore(tokens, contextTokens);
         const actionability = actionabilityScore(node);
         const novelty = existingLabelSet.has(normalizedLabel) ? 0 : 1;
-        const genericPenalty = GENERIC_LABELS.has(normalizedLabel) ? 0.45 : 0;
+        const isPlaceholder = /^[a-z]?\d{1,4}$/i.test(node.label.trim()) || /^t\d{1,4}$/i.test(node.label.trim());
+        const genericPenalty = (GENERIC_LABELS.has(normalizedLabel) || isPlaceholder) ? 0.45 : 0;
         const score = (relevance * 0.45) + (actionability * 0.35) + (novelty * 0.20) - genericPenalty;
         return { node, score, normalizedLabel, novelty };
     });
 
     const byScore = [...scored].sort((a, b) => b.score - a.score);
     const selectedLabels = new Set<string>();
-    const threshold = context.sectionLabel ? 0.33 : 0.28;
+    const threshold = context.sectionLabel ? 0.20 : 0.16;
     const accepted: MindMapNode[] = [];
 
     for (const item of byScore) {
         if (selectedLabels.has(item.normalizedLabel)) continue;
-        if (item.novelty === 0) continue;
+        if (item.novelty === 0 && item.score < threshold + 0.12) continue;
         if (item.score < threshold) continue;
 
         let node = item.node;
@@ -147,6 +149,36 @@ export function applyQualityGate(
 
         accepted.push(node);
         selectedLabels.add(item.normalizedLabel);
+    }
+
+    // Preserve at least one advanced thinking node if model produced one.
+    const hasAdvanced = accepted.some((node) => ['question', 'decision', 'tradeoff'].includes(node.nodeType || ''));
+    if (!hasAdvanced) {
+        const advancedCandidate = byScore.find((item) =>
+            ['question', 'decision', 'tradeoff'].includes(item.node.nodeType || '') &&
+            !selectedLabels.has(item.normalizedLabel)
+        );
+        if (advancedCandidate) {
+            accepted.push(advancedCandidate.node);
+            selectedLabels.add(advancedCandidate.normalizedLabel);
+        }
+    }
+
+    const minAccepted = context.sectionLabel ? 4 : 2;
+    if (accepted.length < minAccepted) {
+        for (const item of byScore) {
+            if (accepted.length >= minAccepted) break;
+            if (selectedLabels.has(item.normalizedLabel)) continue;
+            let node = item.node;
+            if (node.nodeClass === 'task' && node.nodeType !== 'checklist') {
+                node = { ...node, nodeType: 'checklist' };
+            }
+            if (node.nodeType === 'checklist') {
+                node = cleanChecklistItems(node);
+            }
+            accepted.push(node);
+            selectedLabels.add(item.normalizedLabel);
+        }
     }
 
     // Never return an empty patch if the model produced something usable.

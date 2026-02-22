@@ -42,7 +42,7 @@ You end up with a structured, visual action plan.
 
 ### 🗺️ Intelligent Mind Map Engine
 - **React Flow** canvas with pan, zoom, minimap, and controls
-- **4 specialized node types:** Expandable (default), Question, Checklist, and Metric
+- **7 specialized node types:** Expandable (default), Question, Checklist, Metric, Decision, Tradeoff, and Image
 - **7-class node taxonomy:** Goal, Subgoal, Task, Resource, Constraint, Metric, Idea — each with distinct color coding
 - **Semantic parent matching:** New nodes automatically attach to the most relevant existing node using TF-IDF-like keyword scoring + class hierarchy compatibility
 - **d3-force physics layout** with class-based clustering (goals at top, tasks in the middle, resources at the bottom)
@@ -130,6 +130,12 @@ NEXT_PUBLIC_FIREBASE_APP_ID=your_app_id
 
 > The app works without Firebase config — it will use mock values and skip authentication.
 
+To deploy Firestore rules/indexes:
+
+```bash
+npx firebase-tools deploy --only firestore:rules,firestore:indexes
+```
+
 ---
 
 ## 📁 Project Structure
@@ -161,7 +167,8 @@ src/
 │                             # design thinking frameworks, node classification
 ├── lib/
 │   ├── store.ts              # Zustand store: nodes, edges, messages, modes
-│   └── firebase.ts           # Firebase initialization
+│   ├── firebase.ts           # Firebase initialization
+│   └── sessionApi.ts         # Typed Firestore session API wrapper
 ├── hooks/
 │   └── useForceLayout.ts     # d3-force physics with class-based clustering
 └── contexts/

@@ -27,7 +27,7 @@ export type NodeClass =
   | 'idea';
 
 /** Valid node types for React Flow rendering */
-export type NodeType = 'expandable' | 'question' | 'checklist' | 'metric';
+export type NodeType = 'expandable' | 'question' | 'checklist' | 'metric' | 'image' | 'decision' | 'tradeoff';
 
 /** Parsed topic from AI response */
 export interface ParsedTopic {
@@ -46,6 +46,10 @@ export interface MindMapNode {
   nodeClass: NodeClass;
   nodeType?: NodeType; // Optional - defaults to 'expandable'
   items?: { id: string; text: string; completed: boolean }[];
+  decisionOptions?: string[];
+  chosenOption?: string;
+  decisionConfidence?: number;
+  tradeoffItems?: { id: string; label: string; impact: number; effort: number; risk: number; time: number }[];
 }
 
 /** Edge structure for mind map */
@@ -358,18 +362,20 @@ RULES:
 3. The mind map data must strictly be inside a \`\`\`mindmap code block.
 4. Define nodes using the exact format: NodeID[Type|Class|Label|Description]
    - NodeID: Unique alphanumeric string (e.g., G1, SEC1, T1)
-   - Type: MUST be exactly one of: expandable, question, checklist, metric. Default to 'expandable'. ONLY use 'checklist' if the user explicitly asks for steps/procedures. ONLY use 'metric' for measurable numbers.
+   - Type: MUST be exactly one of: expandable, question, checklist, metric, decision, tradeoff, image. Default to 'expandable'. ONLY use 'checklist' if the user explicitly asks for steps/procedures. ONLY use 'metric' for measurable numbers.
    - Class: MUST be exactly one of: goal, section, subgoal, task, resource, constraint, metric, idea. Use 'section' for broad areas of work.
    - Label: The text label for the node. Keep it concise (max 5 words).
    - Description: A 1-2 sentence detailed explanation of the node's purpose. MUST NOT BE EMPTY.
 5. For checklist nodes, ALWAYS add an ITEMS line on the very next line: ITEMS: item1 | item2 | item3
    Pre-fill 3-6 actionable checklist items relevant to the node's purpose.
    Checklist items must be concise verb phrases and must NOT repeat the full node label text.
-6. Define connections between nodes: SourceID --> TargetID
-7. You MUST output at least 2 new nodes per response, unless you emit SWITCH_SECTION.
-8. NEVER output placeholder text or bracket templates.
-9. NEVER mention internal frameworks, node types, or map syntax in your conversational message. Keep the chat natural and human.
-10. If the request clearly belongs in a different existing section, output:
+6. For decision nodes, add: OPTIONS: option1 | option2 | option3 and optionally CHOSEN: option.
+7. For tradeoff nodes, add: ROWS: candidate1 | candidate2 | candidate3
+8. Define connections between nodes: SourceID --> TargetID
+9. You MUST output at least 4 new nodes per response, unless you emit SWITCH_SECTION.
+10. NEVER output placeholder text or bracket templates.
+11. NEVER mention internal frameworks, node types, or map syntax in your conversational message. Keep the chat natural and human.
+12. If the request clearly belongs in a different existing section, output:
     SWITCH_SECTION: <Exact Section Label> | <short reason>
     In this case, do not add new nodes in the mindmap block.
 
@@ -401,11 +407,12 @@ Follow the core rules:
 1. Create 1 ROOT node (Class: goal) that represents the core objective.
 2. Create 6-8 SECTION nodes (Class: section) connected directly to the root.
 3. Sections must be non-overlapping and strategic (no generic catch-all like "Misc" or "General").
-4. For EACH section node, create 2-3 focused child nodes (Class: task, resource, metric, or constraint).
+4. For EACH section node, create 3-5 focused child nodes (Class: task, resource, metric, or constraint).
 5. Include at least 2 metrics and at least 2 constraints overall.
 6. Prioritize high-leverage planning nodes: stakeholders, scope, milestones, risks, dependencies, budget/resources, success criteria.
 7. Avoid niche trivia, low-impact implementation details, or tool-name-only nodes.
-8. Keep the first map performant: target 22-32 nodes total with meaningful hierarchy.`;
+8. Include at least one question node and one decision or tradeoff node where suitable.
+9. Keep the first map rich but still navigable: target 34-48 nodes total with meaningful hierarchy.`;
 }
 
 function extractSectionContext(userMessage: string): { sectionLabel: string | null; cleanedMessage: string } {
@@ -466,7 +473,7 @@ ${sectionInstruction}
 USER APPLIES TO YOU: "${cleanedMessage}"
 
 Rules for the mindmap code block:
-- Create 2-4 new nodes that expand the map based on the user's message.
+- Create 4-8 new nodes that expand the map based on the user's message.
 - You MUST connect each new node from an EXISTING source node ID in CURRENT MAP CONTEXT.
 - Never invent source IDs that are not present in CURRENT MAP CONTEXT.
 - Do NOT recreate existing nodes.
@@ -474,6 +481,7 @@ Rules for the mindmap code block:
 - Prefer section-scoped additions: if sections exist, avoid attaching non-section nodes directly to goal.
 - Keep labels concrete and specific. Avoid vague labels like "Improve Plan", "General Ideas", or "Misc".
 - Include at least one concrete execution node (task/resource/metric/constraint) unless the user explicitly asks for pure ideation.
+- When relevant, include at least one advanced thinking node type: question, decision, or tradeoff.
 - Descriptions must state why this node matters for the active section or goal.
 - Remember the exact format: NodeID[Type|Class|Label|Description]`;
 }
@@ -487,7 +495,7 @@ Rules for the mindmap code block:
  */
 function validateNodeType(typeStr: string): NodeType {
   const normalized = typeStr.toLowerCase().trim();
-  const validTypes: NodeType[] = ['expandable', 'question', 'checklist', 'metric'];
+  const validTypes: NodeType[] = ['expandable', 'question', 'checklist', 'metric', 'image', 'decision', 'tradeoff'];
 
   if (validTypes.includes(normalized as NodeType)) {
     return normalized as NodeType;
@@ -516,15 +524,20 @@ function inferNodeType(
   hasItems: boolean
 ): NodeType {
   const explicit = validateNodeType(explicitType);
-  if (explicitType && ['expandable', 'question', 'checklist', 'metric'].includes(explicitType.toLowerCase().trim())) {
+  if (explicitType && ['expandable', 'question', 'checklist', 'metric', 'image', 'decision', 'tradeoff'].includes(explicitType.toLowerCase().trim())) {
     return explicit;
   }
 
   const normalizedLabel = label.toLowerCase().trim();
   const normalizedDescription = description.toLowerCase().trim();
 
+  if (/\b(decide|decision|choose|pick|option|go\/no-go)\b/i.test(`${normalizedLabel} ${normalizedDescription}`)) {
+    return 'decision';
+  }
+  if (/\b(trade[- ]?off|impact\s*vs\.?\s*effort|impact-effort|prioriti[sz]e matrix|cost[- ]benefit)\b/i.test(`${normalizedLabel} ${normalizedDescription}`)) {
+    return 'tradeoff';
+  }
   if (nodeClass === 'metric') return 'metric';
-  if (hasItems || nodeClass === 'task') return 'checklist';
   if (
     normalizedLabel.endsWith('?') ||
     /^(how|what|why|which|who|where|when)\b/i.test(normalizedLabel) ||
@@ -532,6 +545,7 @@ function inferNodeType(
   ) {
     return 'question';
   }
+  if (hasItems || nodeClass === 'task') return 'checklist';
   return explicit;
 }
 
@@ -643,6 +657,12 @@ export function parseAIResponse(
       // Strip patterns like " --> T2" or "[task" from leaked map syntax  
       description = description.replace(/\s*[-–→]+\s*[A-Z0-9_-]+.*$/i, '').trim();
       description = description.replace(/\[[^\]]*$/i, '').trim(); // Remove unclosed brackets
+      description = description.replace(/^['"`]|['"`]$/g, '').trim();
+
+      // Guard against leaked placeholder IDs like "T6" being used as descriptions.
+      if (/^[A-Z]?\d{1,4}$/i.test(description) || /^T\d{1,4}$/i.test(description) || description.length < 4) {
+        description = `Key detail for ${nodeMatch[4].trim()}.`;
+      }
 
       const label = nodeMatch[4].trim();
       const rawClass = nodeMatch[3].trim();
@@ -659,9 +679,19 @@ export function parseAIResponse(
         description,
       };
 
-      // Check for ITEMS: pre-fill on subsequent lines
-      if (i + 1 < lines.length) {
-        const nextLine = lines[i + 1].trim();
+      // Parse optional metadata lines in any order directly after a node.
+      let lookahead = i + 1;
+      while (lookahead < lines.length) {
+        const nextLine = lines[lookahead].trim();
+        if (!nextLine) {
+          lookahead += 1;
+          continue;
+        }
+
+        const looksLikeNode = /^([A-Z0-9_-]+)\[([^|]+)\|([^|]+)\|([^|\]]+)(?:\|([^\]]*))?\]/i.test(nextLine);
+        const looksLikeEdge = /^([A-Z0-9_-]+)\s*-->\s*([A-Z0-9_-]+)/i.test(nextLine);
+        if (looksLikeNode || looksLikeEdge) break;
+
         const itemsMatch = nextLine.match(/^ITEMS:\s*(.+)/i);
         if (itemsMatch) {
           nodeData.items = itemsMatch[1].split('|').map((text: string, idx: number) => ({
@@ -669,9 +699,50 @@ export function parseAIResponse(
             text: text.trim(),
             completed: false,
           })).filter((item: { text: string }) => item.text.length > 0);
-          i++; // Skip the ITEMS line in next iteration
+          lookahead += 1;
+          continue;
         }
+
+        const optionsMatch = nextLine.match(/^OPTIONS:\s*(.+)/i);
+        if (optionsMatch) {
+          nodeData.decisionOptions = optionsMatch[1]
+            .split('|')
+            .map((option) => option.trim())
+            .filter((option) => option.length > 0)
+            .slice(0, 6);
+          lookahead += 1;
+          continue;
+        }
+
+        const chosenMatch = nextLine.match(/^CHOSEN:\s*(.+)/i);
+        if (chosenMatch) {
+          nodeData.chosenOption = chosenMatch[1].trim();
+          lookahead += 1;
+          continue;
+        }
+
+        const rowsMatch = nextLine.match(/^ROWS:\s*(.+)/i);
+        if (rowsMatch) {
+          const rows = rowsMatch[1]
+            .split('|')
+            .map((value) => value.trim())
+            .filter((value) => value.length > 0)
+            .slice(0, 6);
+          nodeData.tradeoffItems = rows.map((rowLabel, idx) => ({
+            id: `${id}_row_${idx}`,
+            label: rowLabel,
+            impact: 3,
+            effort: 3,
+            risk: 2,
+            time: 3,
+          }));
+          lookahead += 1;
+          continue;
+        }
+
+        break;
       }
+      i = lookahead - 1;
 
       nodeData.nodeType = inferNodeType(
         nodeMatch[2],
@@ -683,6 +754,16 @@ export function parseAIResponse(
 
       if (nodeData.nodeType === 'checklist' && (!nodeData.items || nodeData.items.length === 0)) {
         nodeData.items = buildDefaultChecklistItems();
+      }
+      if (nodeData.nodeType === 'decision' && (!nodeData.decisionOptions || nodeData.decisionOptions.length === 0)) {
+        nodeData.decisionOptions = ['Option A', 'Option B', 'Option C'];
+      }
+      if (nodeData.nodeType === 'tradeoff' && (!nodeData.tradeoffItems || nodeData.tradeoffItems.length === 0)) {
+        nodeData.tradeoffItems = [
+          { id: `${id}_row_0`, label: 'Low effort path', impact: 3, effort: 2, risk: 3, time: 2 },
+          { id: `${id}_row_1`, label: 'Balanced path', impact: 4, effort: 3, risk: 2, time: 3 },
+          { id: `${id}_row_2`, label: 'High impact path', impact: 5, effort: 4, risk: 3, time: 4 },
+        ];
       }
 
       newNodes.push(nodeData);
@@ -856,7 +937,7 @@ export class AIService {
     currentMindMapJSON: string,
     thinkingMode?: 'explore' | 'analyze' | 'create' | 'execute',
     onProgress?: InitProgressCallback,
-    options?: { forceContextual?: boolean; maxTokens?: number; temperature?: number }
+    options?: { forceContextual?: boolean; preEnrichedUserPrompt?: boolean; maxTokens?: number; temperature?: number }
   ): Promise<string> {
     const engine = await this.getEngine(onProgress);
 
@@ -891,21 +972,21 @@ export class AIService {
         });
       }
 
-      const existingLabels = this.extractNodeLabels(currentMindMapJSON);
+      if (!options?.preEnrichedUserPrompt) {
+        const existingLabels = this.extractNodeLabels(currentMindMapJSON);
 
-      // Add the structured prompt as the final user message
-      messages.push({
-        role: "user",
-        content: buildContextualPrompt(
-          initialGoal,
-          lastUserMsg,
-          existingLabels,
-          planningContext
-        )
-      });
+        // Add the structured prompt as the final user message when caller did not provide an enriched prompt.
+        messages.push({
+          role: "user",
+          content: buildContextualPrompt(
+            initialGoal,
+            lastUserMsg,
+            existingLabels,
+            planningContext
+          )
+        });
+      }
     }
-
-    console.log(`[AIService] Context: ${planningContext}, History: ${messages.length} msgs`);
 
     const reply = await engine.chat.completions.create({
       messages: messages as unknown as Parameters<typeof engine.chat.completions.create>[0]['messages'],
@@ -914,7 +995,6 @@ export class AIService {
     });
 
     const response = reply.choices[0].message.content || "";
-    console.log("[AIService] Response:", response.slice(0, 200) + "...");
 
     return response;
   }

@@ -25,6 +25,10 @@ export interface AINodeData {
     nodeType?: string;
     imageUrl?: string;
     items?: { id: string; text: string; completed: boolean }[];
+    decisionOptions?: string[];
+    chosenOption?: string;
+    decisionConfidence?: number;
+    tradeoffItems?: { id: string; label: string; impact: number; effort: number; risk: number; time: number }[];
     currentValue?: number;
     targetValue?: number;
     unit?: string;
@@ -145,6 +149,7 @@ interface SessionData {
     projectIntakePrompted?: boolean;
     userConstraints?: string[];
     proposalMode?: boolean;
+    sectionLoadingIds?: Record<string, boolean>;
 }
 
 const MAX_HISTORY = 50; // Maximum number of states to remember for undo/redo
@@ -167,6 +172,7 @@ interface AppState {
     setMindMapFromJSON: (mapData: { nodes: AINodeData[], edges: AIEdgeData[], nodeUpdates?: AINodeUpdateData[] }) => void;
     getMindMapAsJSON: () => string;
     getScopedMindMapAsJSON: () => string;
+    getScopedMindMapAsJSONForSection: (sectionId: string | null) => string;
     updateNodeContent: (id: string, label: string, description: string) => void;
 
     // Phase 4: Undo/Redo (Fix #38)
@@ -198,6 +204,9 @@ interface AppState {
     closeSectionBriefDraft: () => void;
     sectionBriefDismissed: Record<string, boolean>;
     setSectionBriefDismissed: (sectionId: string, dismissed: boolean) => void;
+    sectionLoadingIds: Record<string, boolean>;
+    setSectionLoading: (sectionId: string, loading: boolean) => void;
+    clearSectionLoading: () => void;
     projectIntake: ProjectIntake | null;
     setProjectIntake: (intake: Omit<ProjectIntake, 'updatedAt'>) => void;
     clearProjectIntake: () => void;
@@ -518,6 +527,14 @@ export const useStore = create<AppState>()(
                 const updatedNodes: Node[] = [];
                 const newNodes: Node[] = [];
                 const idMapping: Map<string, string> = new Map();
+                const sanitizeDescription = (label: string, description?: string) => {
+                    const raw = String(description || '').trim().replace(/^['"`]|['"`]$/g, '').trim();
+                    if (!raw) return '';
+                    if (/^[A-Z]?\d{1,4}$/i.test(raw) || /^T\d{1,4}$/i.test(raw) || raw.length < 4) {
+                        return `Key detail for ${label}.`;
+                    }
+                    return raw;
+                };
 
                 // V38: Process nodeUpdates FIRST to update existing descriptions
                 if (mapData.nodeUpdates && Array.isArray(mapData.nodeUpdates)) {
@@ -528,7 +545,7 @@ export const useStore = create<AppState>()(
                                 ...existingNode,
                                 data: {
                                     ...existingNode.data,
-                                    description: update.description,
+                                    description: sanitizeDescription(String(existingNode.data.label || ''), update.description),
                                 }
                             });
                         }
@@ -557,9 +574,13 @@ export const useStore = create<AppState>()(
                             data: {
                                 ...existingById.data,
                                 label: n.label || existingById.data.label,
-                                description: n.description || existingById.data.description,
+                                description: sanitizeDescription(String(n.label || existingById.data.label || ''), n.description) || existingById.data.description,
                                 nodeClass: n.nodeClass || existingById.data.nodeClass || 'goal',
                                 ...(n.items ? { items: n.items } : {}),
+                                ...(Array.isArray(n.decisionOptions) ? { decisionOptions: n.decisionOptions } : {}),
+                                ...(typeof n.chosenOption === 'string' ? { chosenOption: n.chosenOption } : {}),
+                                ...(typeof n.decisionConfidence === 'number' ? { decisionConfidence: n.decisionConfidence } : {}),
+                                ...(Array.isArray(n.tradeoffItems) ? { tradeoffItems: n.tradeoffItems } : {}),
                                 ...(typeof n.currentValue === 'number' ? { currentValue: n.currentValue } : {}),
                                 ...(typeof n.targetValue === 'number' ? { targetValue: n.targetValue } : {}),
                                 ...(typeof n.unit === 'string' ? { unit: n.unit } : {}),
@@ -581,7 +602,7 @@ export const useStore = create<AppState>()(
                                     ...existingByLabel,
                                     data: {
                                         ...existingByLabel.data,
-                                        description: n.description,
+                                        description: sanitizeDescription(String(n.label || existingByLabel.data.label || ''), n.description),
                                         // Update class if AI provides a clearer one?
                                         ...(n.nodeClass ? { nodeClass: n.nodeClass } : {}) // Update class if provided
                                     }
@@ -595,10 +616,13 @@ export const useStore = create<AppState>()(
 
                         // Use AI-specified node type, default to 'expandable'
                         // CRITICAL: If nodeClass is 'section', always use type 'section'
-                        const validNodeTypes = ['expandable', 'question', 'checklist', 'metric', 'section'];
+                        const validNodeTypes = ['expandable', 'question', 'checklist', 'metric', 'section', 'image', 'decision', 'tradeoff'];
+                        const nodeText = `${String(n.label || '')} ${String(n.description || '')}`.toLowerCase();
                         const inferredType =
                             n.nodeClass === 'section' ? 'section'
                                 : n.nodeClass === 'metric' ? 'metric'
+                                    : /\b(decide|decision|choose|option)\b/.test(nodeText) ? 'decision'
+                                        : /\b(trade[- ]?off|impact|effort|prioriti[sz]e|rank|matrix)\b/.test(nodeText) ? 'tradeoff'
                                     : n.nodeClass === 'task' ? 'checklist'
                                         : 'expandable';
                         let nodeType = (n.nodeType && validNodeTypes.includes(n.nodeType)) ? n.nodeType : inferredType;
@@ -614,10 +638,14 @@ export const useStore = create<AppState>()(
                             position: { x: Math.random() * 600, y: Math.random() * 400 },
                             data: {
                                 label: n.label,
-                                description: n.description || '',
+                                description: sanitizeDescription(String(n.label || ''), n.description),
                                 imageUrl: n.imageUrl,
                                 nodeClass: n.nodeClass || 'idea',
                                 ...(checklistItems ? { items: checklistItems } : {}),
+                                ...(Array.isArray(n.decisionOptions) ? { decisionOptions: n.decisionOptions } : {}),
+                                ...(typeof n.chosenOption === 'string' ? { chosenOption: n.chosenOption } : {}),
+                                ...(typeof n.decisionConfidence === 'number' ? { decisionConfidence: n.decisionConfidence } : {}),
+                                ...(Array.isArray(n.tradeoffItems) ? { tradeoffItems: n.tradeoffItems } : {}),
                                 ...(typeof n.currentValue === 'number' ? { currentValue: n.currentValue } : {}),
                                 ...(typeof n.targetValue === 'number' ? { targetValue: n.targetValue } : {}),
                                 ...(typeof n.unit === 'string' ? { unit: n.unit } : {}),
@@ -879,7 +907,6 @@ export const useStore = create<AppState>()(
 
                 const mergedEdges = [...currentEdges, ...newEdgesFromAI, ...orphanEdges];
 
-                console.log(`V38: Added ${newNodes.length} new nodes, ${newEdgesFromAI.length} edges, ${orphanEdges.length} orphan edges.Updated ${updatedNodes.length} descriptions.`);
                 set({ nodes: mergedNodes, edges: mergedEdges });
             },
 
@@ -903,13 +930,18 @@ export const useStore = create<AppState>()(
 
             getScopedMindMapAsJSON: () => {
                 const state = get();
-                const activeSection = state.activeSection;
+                return get().getScopedMindMapAsJSONForSection(state.activeSection);
+            },
+
+            getScopedMindMapAsJSONForSection: (sectionId) => {
+                const state = get();
+                const activeSection = sectionId;
 
                 let visibleNodes = state.nodes;
                 let visibleEdges = state.edges;
 
                 if (activeSection) {
-                    // Section Mode: active section and all children
+                    // Section mode: target subtree plus lightweight global section headers for coherence.
                     const sectionDescendantIds = new Set<string>();
                     const adjacency = new Map<string, string[]>();
                     const nodeById = new Map(state.nodes.map((node) => [node.id, node]));
@@ -935,9 +967,18 @@ export const useStore = create<AppState>()(
                         }
                     }
 
-                    // Always include Goal for global context reference
-                    visibleNodes = state.nodes.filter(n => sectionDescendantIds.has(n.id) || n.data.nodeClass === 'goal');
-                    visibleEdges = state.edges.filter(e => sectionDescendantIds.has(e.source) && sectionDescendantIds.has(e.target));
+                    const sectionNodeIds = state.nodes
+                        .filter((n) => n.data.nodeClass === 'section' || n.type === 'section')
+                        .map((n) => n.id);
+
+                    const visibleNodeIds = new Set<string>([
+                        ...sectionDescendantIds,
+                        ...sectionNodeIds,
+                        ...state.nodes.filter((n) => n.data.nodeClass === 'goal').map((n) => n.id)
+                    ]);
+
+                    visibleNodes = state.nodes.filter((n) => visibleNodeIds.has(n.id));
+                    visibleEdges = state.edges.filter((e) => visibleNodeIds.has(e.source) && visibleNodeIds.has(e.target));
                 } else {
                     // Overview Mode: Root and top-level sections
                     const sectionNodeIds = state.nodes.filter(n => n.data.nodeClass === 'section' || n.type === 'section').map(n => n.id);
@@ -1019,6 +1060,17 @@ export const useStore = create<AppState>()(
                     [sectionId]: dismissed,
                 }
             })),
+            sectionLoadingIds: {},
+            setSectionLoading: (sectionId, loading) => set((state) => {
+                const next = { ...state.sectionLoadingIds };
+                if (loading) {
+                    next[sectionId] = true;
+                } else {
+                    delete next[sectionId];
+                }
+                return { sectionLoadingIds: next };
+            }),
+            clearSectionLoading: () => set({ sectionLoadingIds: {} }),
             projectIntake: null,
             setProjectIntake: (intake) => set({
                 projectIntake: {
@@ -1105,6 +1157,7 @@ export const useStore = create<AppState>()(
                     proposals: {},
                     sectionBriefs: data.sectionBriefs || {},
                     sectionBriefDismissed: data.sectionBriefDismissed || {},
+                    sectionLoadingIds: state.sectionLoadingIds || {},
                     projectIntake: data.projectIntake || null,
                     projectIntakePrompted: data.projectIntakePrompted ?? false,
                     userConstraints: data.userConstraints || [],
@@ -1120,6 +1173,7 @@ export const useStore = create<AppState>()(
                 sectionBriefs: {},
                 sectionBriefDraftFor: null,
                 sectionBriefDismissed: {},
+                sectionLoadingIds: {},
                 projectIntake: null,
                 projectIntakePrompted: false,
                 userConstraints: [],

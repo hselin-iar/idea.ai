@@ -6,15 +6,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { useStore } from '@/lib/store';
 import LoginButton from '@/components/Auth/LoginButton';
 import { useAuth } from '@/contexts/AuthContext';
-import { db, isFirebaseConfigured } from '@/lib/firebase';
-import { collection, deleteDoc, doc, onSnapshot, orderBy, query } from 'firebase/firestore';
-
-interface SessionSummary {
-  id: string;
-  goal: string;
-  updatedAt: number;
-  nodesCount: number;
-}
+import { isFirebaseConfigured } from '@/lib/firebase';
+import { deleteSessionById, SessionSummary, subscribeToSessionSummaries } from '@/lib/sessionApi';
 
 export default function LandingPage() {
   const [inputGoal, setInputGoal] = useState('');
@@ -45,20 +38,7 @@ export default function LandingPage() {
 
   useEffect(() => {
     if (!user || !isFirebaseConfigured) return;
-    const sessionsRef = collection(db, 'users', user.uid, 'sessions');
-    const q = query(sessionsRef, orderBy('updatedAt', 'desc'));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const next = snapshot.docs.map((sessionDoc) => {
-        const data = sessionDoc.data();
-        return {
-          id: sessionDoc.id,
-          goal: data.goal || 'Untitled session',
-          updatedAt: data.updatedAt || 0,
-          nodesCount: Array.isArray(data.nodes) ? data.nodes.length : 0,
-        } satisfies SessionSummary;
-      });
-      setSessions(next);
-    }, (error) => {
+    const unsubscribe = subscribeToSessionSummaries(user.uid, setSessions, (error) => {
       console.error('[Landing] failed to load history', error);
     });
     return () => unsubscribe();
@@ -71,7 +51,7 @@ export default function LandingPage() {
   const handleDeleteSession = async (sessionId: string) => {
     if (!user) return;
     try {
-      await deleteDoc(doc(db, 'users', user.uid, 'sessions', sessionId));
+      await deleteSessionById(user.uid, sessionId);
     } catch (error) {
       console.error('[Landing] failed to delete session', error);
     }

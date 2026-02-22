@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { memo, useMemo } from 'react';
 import { Handle, NodeProps, Position, Node } from '@xyflow/react';
 import { FolderOpen } from 'lucide-react';
 import { useStore } from '@/lib/store';
@@ -9,15 +9,17 @@ interface SectionNodeData extends Record<string, unknown> {
     nodeClass?: string;
 }
 
-export default function SectionNode({ data, id }: NodeProps<Node<SectionNodeData>>) {
+function SectionNode({ data, id }: NodeProps<Node<SectionNodeData>>) {
     const setActiveSection = useStore((state) => state.setActiveSection);
     const openSectionBriefDraft = useStore((state) => state.openSectionBriefDraft);
     const setSectionBriefDismissed = useStore((state) => state.setSectionBriefDismissed);
-    const sectionBriefs = useStore((state) => state.sectionBriefs);
+    const sectionLoadingIds = useStore((state) => state.sectionLoadingIds);
+    const addMessage = useStore((state) => state.addMessage);
+    const isSectionLoading = !!sectionLoadingIds[id];
 
     // Count all descendants for the badge
     const edges = useStore((state) => state.edges);
-    const childCount = (() => {
+    const childCount = useMemo(() => {
         const visited = new Set<string>();
         const adjacency = new Map<string, string[]>();
         edges.forEach((edge) => {
@@ -37,17 +39,18 @@ export default function SectionNode({ data, id }: NodeProps<Node<SectionNodeData
             }
         }
         return visited.size;
-    })();
+    }, [edges, id]);
 
     return (
         <div
             onClick={() => {
-                setActiveSection(id);
-                if (!sectionBriefs[id]) {
-                    openSectionBriefDraft(id);
+                if (isSectionLoading) {
+                    addMessage('assistant', `${data.label} is still updating in the background. You can open it once processing completes.`);
+                    return;
                 }
+                setActiveSection(id);
             }}
-            className="group relative section-card cursor-pointer hover:shadow-lg transition-all flex flex-col h-full min-h-[140px]"
+            className={`group relative section-card hover:shadow-lg transition-all flex flex-col h-full min-h-[140px] ${isSectionLoading ? 'cursor-wait opacity-85' : 'cursor-pointer'}`}
         >
             <Handle type="target" position={Position.Top} className="opacity-0" />
 
@@ -64,13 +67,15 @@ export default function SectionNode({ data, id }: NodeProps<Node<SectionNodeData
                         <button
                             onClick={(event) => {
                                 event.stopPropagation();
+                                if (isSectionLoading) return;
                                 setSectionBriefDismissed(id, false);
                                 openSectionBriefDraft(id);
                             }}
-                            className="rounded-md border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-200 hover:bg-white/10"
+                            className="rounded-md border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-200 hover:bg-white/10 disabled:opacity-50"
                             title="Add section info"
+                            disabled={isSectionLoading}
                         >
-                            Info
+                            {isSectionLoading ? 'Updating...' : 'Info'}
                         </button>
                     </div>
                 </div>
@@ -96,3 +101,5 @@ export default function SectionNode({ data, id }: NodeProps<Node<SectionNodeData
         </div>
     );
 }
+
+export default memo(SectionNode);

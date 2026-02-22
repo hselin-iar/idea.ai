@@ -267,6 +267,240 @@ function buildIntentPrompt(input: string): string {
     return trimmed;
 }
 
+function buildProjectIntakeFallbackPatch(
+    sectionId: string,
+    sectionLabel: string,
+    intake: {
+        objective: string;
+        audience: string;
+        constraints: string;
+        successSignal: string;
+    },
+    count: number
+): { nodes: MindMapNode[]; edges: { source: string; target: string }[] } {
+    const objective = intake.objective.trim() || 'Deliver meaningful progress';
+    const constraints = intake.constraints.trim() || 'Operate within practical limits';
+    const successSignal = intake.successSignal.trim() || 'Track clear outcome signal';
+    const audience = intake.audience.trim() || 'Primary users';
+
+    const templates: Array<Pick<MindMapNode, 'label' | 'description' | 'nodeClass' | 'nodeType'> & {
+        items?: { id: string; text: string; completed: boolean }[];
+        decisionOptions?: string[];
+        tradeoffItems?: { id: string; label: string; impact: number; effort: number; risk: number; time: number }[];
+    }> = [
+        {
+            label: `${sectionLabel}: Key Question`,
+            description: `What is the highest-leverage move for "${sectionLabel}" to advance ${objective.toLowerCase()}?`,
+            nodeClass: 'idea',
+            nodeType: 'question',
+        },
+        {
+            label: `${sectionLabel}: Execution Checklist`,
+            description: `Concrete steps to execute ${sectionLabel} with focus on ${audience.toLowerCase()}.`,
+            nodeClass: 'task',
+            nodeType: 'checklist',
+            items: [
+                { id: uuidv4(), text: 'Define owner and timeline', completed: false },
+                { id: uuidv4(), text: 'Ship first implementation', completed: false },
+                { id: uuidv4(), text: 'Review outcomes and iterate', completed: false },
+            ]
+        },
+        {
+            label: `${sectionLabel}: Core Decision`,
+            description: `Choose a direction that balances constraints: ${constraints}.`,
+            nodeClass: 'idea',
+            nodeType: 'decision',
+            decisionOptions: ['Fast iteration', 'Balanced rollout', 'High assurance']
+        },
+        {
+            label: `${sectionLabel}: Tradeoff Matrix`,
+            description: `Compare options by impact, effort, risk, and time for this section.`,
+            nodeClass: 'idea',
+            nodeType: 'tradeoff',
+            tradeoffItems: [
+                { id: uuidv4(), label: 'Low effort path', impact: 3, effort: 2, risk: 3, time: 2 },
+                { id: uuidv4(), label: 'Balanced path', impact: 4, effort: 3, risk: 2, time: 3 },
+                { id: uuidv4(), label: 'High impact path', impact: 5, effort: 4, risk: 3, time: 4 },
+            ]
+        },
+        {
+            label: `${sectionLabel}: Success Metric`,
+            description: `Measure progress using: ${successSignal}.`,
+            nodeClass: 'metric',
+            nodeType: 'metric',
+        },
+    ];
+
+    const nodes: MindMapNode[] = templates.slice(0, Math.max(1, Math.min(count, templates.length))).map((template) => ({
+        id: uuidv4(),
+        label: template.label,
+        description: template.description,
+        nodeClass: template.nodeClass,
+        nodeType: template.nodeType,
+        items: template.items,
+        decisionOptions: template.decisionOptions,
+        tradeoffItems: template.tradeoffItems,
+    }));
+    const edges = nodes.map((node) => ({ source: sectionId, target: node.id }));
+    return { nodes, edges };
+}
+
+type ChatIntentType = 'question' | 'information' | 'instruction' | 'radical';
+type ImpactBand = 'single' | 'few' | 'broad';
+
+interface ChatIntentAnalysis {
+    type: ChatIntentType;
+    impactedSectionIds: string[];
+    impactedSectionLabels: string[];
+    impactBand: ImpactBand;
+    shouldMicroUpdate: boolean;
+    maxNodesPerSection: number;
+}
+
+interface SectionScopeNode {
+    id: string;
+    type?: string;
+    data: {
+        label?: unknown;
+        description?: unknown;
+        nodeClass?: unknown;
+    };
+}
+
+function extractConversationalText(raw: string): string {
+    return raw
+        .replace(/```[\s\S]*?```/g, ' ')
+        .replace(/^[A-Z0-9_-]+\s*-->\s*[A-Z0-9_-]+.*$/gim, ' ')
+        .replace(/^[A-Z0-9_-]+\[.*$/gim, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function overlapCount(a: Set<string>, b: Set<string>): number {
+    let overlap = 0;
+    for (const token of a) {
+        if (b.has(token)) overlap += 1;
+    }
+    return overlap;
+}
+
+function analyzeChatIntent(
+    rawText: string,
+    allNodes: SectionScopeNode[],
+    activeSectionId?: string | null
+): ChatIntentAnalysis {
+    const text = rawText.trim();
+    const lower = text.toLowerCase();
+    const messageTokens = normalizeTokenSet(text);
+
+    const radical = /\b(regenerate|rebuild|rework everything|redo all|start over|from scratch|full rewrite|complete overhaul|restructure all)\b/i.test(lower);
+    const actionRequest = /^(can|could|would|should)\s+you\b.*\b(add|update|create|remove|change|optimize|expand|refactor|implement|fix|improve|organize|prioritize)\b/i.test(lower);
+    const question = !actionRequest && (/\?$/.test(text) || /^(how|what|why|which|who|where|when|can|could|should|would)\b/i.test(lower));
+    const instruction = /\b(add|update|create|remove|change|optimize|expand|refactor|implement|fix|improve|organize|prioritize)\b/i.test(lower);
+
+    const type: ChatIntentType = radical
+        ? 'radical'
+        : question
+            ? 'question'
+            : instruction
+                ? 'instruction'
+                : 'information';
+
+    const sectionNodes = allNodes
+        .filter((node) => String(node.data?.nodeClass || '').toLowerCase() === 'section' || node.type === 'section')
+        .map((node) => ({
+            id: node.id,
+            label: String(node.data?.label || ''),
+            description: String(node.data?.description || ''),
+        }));
+
+    const broadRequested = /\b(all sections|every section|overall|across the project|everywhere|whole map|entire project)\b/i.test(lower);
+    const ranked = sectionNodes
+        .map((section) => {
+            const sectionTokens = normalizeTokenSet(`${section.label} ${section.description}`);
+            const overlap = overlapCount(messageTokens, sectionTokens);
+            const explicitMention = section.label && lower.includes(section.label.toLowerCase()) ? 3 : 0;
+            const score = overlap + explicitMention;
+            return { ...section, score };
+        })
+        .sort((a, b) => b.score - a.score);
+
+    let impacted = broadRequested || type === 'radical'
+        ? ranked
+        : ranked.filter((entry) => entry.score > 0);
+
+    if (impacted.length === 0 && activeSectionId) {
+        const active = sectionNodes.find((section) => section.id === activeSectionId);
+        if (active) impacted = [active];
+    }
+    if (impacted.length === 0 && ranked.length > 0) {
+        impacted = [ranked[0]];
+    }
+
+    const limit = type === 'information'
+        ? 3
+        : type === 'question'
+            ? 2
+            : type === 'instruction'
+                ? 2
+                : Math.max(6, impacted.length);
+    impacted = impacted.slice(0, limit);
+
+    const impactBand: ImpactBand = impacted.length <= 1
+        ? 'single'
+        : impacted.length <= 3
+            ? 'few'
+            : 'broad';
+
+    const maxNodesPerSection = type === 'information'
+        ? (impactBand === 'broad' ? 1 : 2)
+        : type === 'question'
+            ? 1
+            : type === 'instruction'
+                ? 3
+                : 8;
+
+    return {
+        type,
+        impactedSectionIds: impacted.map((section) => section.id),
+        impactedSectionLabels: impacted.map((section) => section.label),
+        impactBand,
+        shouldMicroUpdate: type === 'information' && impacted.length > 0 && !radical,
+        maxNodesPerSection,
+    };
+}
+
+function buildIntentPolicyBlock(analysis: ChatIntentAnalysis): string {
+    if (analysis.type === 'question') {
+        return [
+            'Chat Handling Policy:',
+            '- Primary goal: answer the question clearly.',
+            '- Mind map changes should be minimal (0-1 node) unless user explicitly asks for expansion.',
+            '- Do not regenerate sections.'
+        ].join('\n');
+    }
+    if (analysis.type === 'instruction') {
+        return [
+            'Chat Handling Policy:',
+            '- Apply incremental updates only.',
+            '- Add focused nodes and preserve existing structure.',
+            '- Do not regenerate full sections unless user explicitly asks.'
+        ].join('\n');
+    }
+    if (analysis.type === 'radical') {
+        return [
+            'Chat Handling Policy:',
+            '- User requested a radical change.',
+            '- Larger structural changes are allowed where necessary.'
+        ].join('\n');
+    }
+    return [
+        'Chat Handling Policy:',
+        '- User message is informational context.',
+        '- Prefer small additive updates and preserve current map.'
+    ].join('\n');
+}
+
 export default function ChatPanel() {
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
@@ -304,6 +538,7 @@ export default function ChatPanel() {
     const goal = useStore((state) => state.goal);
     const nodes = useStore((state) => state.nodes);
     const getScopedMindMapAsJSON = useStore((state) => state.getScopedMindMapAsJSON);
+    const getScopedMindMapAsJSONForSection = useStore((state) => state.getScopedMindMapAsJSONForSection);
     const setMindMapFromJSON = useStore((state) => state.setMindMapFromJSON);
     const getMessagesForAI = useStore((state) => state.getMessagesForAI);
     const sectionBriefs = useStore((state) => state.sectionBriefs);
@@ -312,6 +547,7 @@ export default function ChatPanel() {
     const projectIntakePrompted = useStore((state) => state.projectIntakePrompted);
     const setProjectIntakePrompted = useStore((state) => state.setProjectIntakePrompted);
     const userConstraints = useStore((state) => state.userConstraints);
+    const setSectionLoading = useStore((state) => state.setSectionLoading);
     const addUserConstraint = useStore((state) => state.addUserConstraint);
     const removeUserConstraint = useStore((state) => state.removeUserConstraint);
     const proposalMode = useStore((state) => state.proposalMode);
@@ -325,6 +561,7 @@ export default function ChatPanel() {
     const hasInitializedRef = useRef(false);
     const scrollRef = useRef<HTMLDivElement>(null);
     const lastUserMessageRef = useRef<string>('');
+    const lastIntentRef = useRef<ChatIntentAnalysis | null>(null);
 
     const runLocalCommand = useCallback((rawText: string): { handled: boolean; aiText?: string } => {
         const trimmed = rawText.trim();
@@ -435,28 +672,76 @@ export default function ChatPanel() {
                 addUserConstraint(constraints);
             }
 
-            const sectionNodes = useStore.getState().nodes.filter(
+            const currentState = useStore.getState();
+            const allNodes = currentState.nodes;
+            const allEdges = currentState.edges;
+            const sectionNodes = allNodes.filter(
                 (node) => node.data.nodeClass === 'section' || node.type === 'section'
             );
 
+            const adjacency = new Map<string, string[]>();
+            allEdges.forEach((edge) => {
+                const children = adjacency.get(edge.source) || [];
+                children.push(edge.target);
+                adjacency.set(edge.source, children);
+            });
+            const nodeById = new Map(allNodes.map((node) => [node.id, node]));
+            const countSectionDescendants = (sectionId: string) => {
+                const visited = new Set<string>();
+                const queue = [sectionId];
+                while (queue.length > 0) {
+                    const current = queue.shift()!;
+                    const children = adjacency.get(current) || [];
+                    for (const child of children) {
+                        if (visited.has(child)) continue;
+                        const childNode = nodeById.get(child);
+                        const isGoal = childNode?.data.nodeClass === 'goal';
+                        const isOtherSection = (childNode?.data.nodeClass === 'section' || childNode?.type === 'section') && child !== sectionId;
+                        if (isGoal || isOtherSection) continue;
+                        visited.add(child);
+                        queue.push(child);
+                    }
+                }
+                return visited.size;
+            };
+
+            const sectionTargets = sectionNodes
+                .map((sectionNode) => ({
+                    id: sectionNode.id,
+                    label: String(sectionNode.data.label || 'Section'),
+                    count: countSectionDescendants(sectionNode.id),
+                }))
+                .sort((a, b) => {
+                    const target = 24;
+                    const score = (count: number) => {
+                        const deficit = target - count;
+                        if (deficit >= 0) return deficit * 2;
+                        return Math.max(1, Math.floor(Math.abs(deficit) * 0.65));
+                    };
+                    return score(b.count) - score(a.count);
+                });
+
+            const selectedSections = sectionTargets;
+
             setIntakeJob({
                 status: 'running',
-                total: sectionNodes.length,
+                total: selectedSections.length,
                 processed: 0,
-                currentSection: sectionNodes[0] ? String(sectionNodes[0].data.label || 'Section') : '',
+                currentSection: selectedSections[0] ? selectedSections[0].label : '',
                 updatedSections: 0,
                 addedNodes: 0,
                 results: [],
             });
 
-            if (sectionNodes.length === 0) {
+            if (selectedSections.length === 0) {
                 setIntakeJob((prev) => ({ ...prev, status: 'done' }));
-                addMessage('assistant', 'Saved project intake. I will apply it as soon as sections are available.');
+                addMessage('assistant', 'Saved project intake. Sections are already dense; I skipped heavy expansion to keep map quality stable.');
                 return;
             }
 
             let updatedSections = 0;
             let addedNodes = 0;
+            const baseHistory = (getMessagesForAI() as ChatMessage[]).slice(-1);
             const intakeText = buildProjectIntakeText({
                 objective,
                 targetAudience,
@@ -465,67 +750,139 @@ export default function ChatPanel() {
                 updatedAt: Date.now(),
             });
 
-            for (const sectionNode of sectionNodes) {
-                const sectionId = sectionNode.id;
-                const sectionLabel = String(sectionNode.data.label || 'Section');
+            for (const section of selectedSections) {
+                const sectionId = section.id;
+                const sectionLabel = section.label;
                 setIntakeJob((prev) => ({ ...prev, currentSection: sectionLabel }));
                 const sectionBrief = useStore.getState().sectionBriefs[sectionId];
                 const sectionBriefText = buildSectionBriefText(sectionBrief);
+                const sectionNodeCount = section.count;
+                const targetRange = sectionNodeCount < 8
+                    ? '8-12'
+                    : sectionNodeCount < 16
+                        ? '6-9'
+                        : sectionNodeCount < 28
+                            ? '4-6'
+                            : sectionNodeCount < 40
+                                ? '2-4'
+                                : '0-2';
+
                 const sectionPrompt = [
                     `[Section: ${sectionLabel}]`,
                     `Update this section with high-impact nodes using the global project intake.`,
                     `Project Intake: ${intakeText}`,
+                    `Current section node count: ${sectionNodeCount}.`,
                     sectionBriefText ? `Section Brief: ${sectionBriefText}` : '',
                     userConstraints.length > 0 ? `Global Constraints: ${userConstraints.join(' | ')}` : '',
-                    'Add only 2-3 concrete nodes. Prioritize non-redundant checklist-style execution details.',
+                    `Add ${targetRange} concrete nodes for this section, focused on execution quality and missing coverage.`,
+                    sectionNodeCount > 40
+                        ? 'This section is dense. Prefer merge/reclassify and cross-section handoffs; avoid increasing net node count.'
+                        : 'If nodes look misplaced here, reframe them into better section categories instead of duplication.',
+                    'Include execution, risks, dependencies, and at least one measurable node when relevant.',
+                    'Use at least one of these node types when suitable: question, decision, tradeoff.',
                 ].filter(Boolean).join('\n');
 
-                const currentNodes = useStore.getState().nodes;
-                const aiNodes: MindMapNode[] = currentNodes.map((node) => ({
-                    id: node.id,
-                    label: String(node.data.label || ''),
-                    description: String(node.data.description || ''),
-                    nodeClass: ((node.data.nodeClass as MindMapNode['nodeClass']) || 'idea'),
-                    nodeType: (typeof node.type === 'string' ? node.type : 'expandable') as MindMapNode['nodeType'],
-                    items: Array.isArray(node.data.items)
-                        ? node.data.items as { id: string; text: string; completed: boolean }[]
-                        : undefined,
-                }));
+                setSectionLoading(sectionId, true);
+                let qualityAddedCount = 0;
+                let wasRedirected = false;
+                const minNetAdds = sectionNodeCount < 8
+                    ? 6
+                    : sectionNodeCount < 16
+                        ? 5
+                        : sectionNodeCount < 28
+                            ? 3
+                            : 2;
+                const maxAttempts = sectionNodeCount < 12 ? 2 : 1;
+                try {
+                    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+                        const currentNodes = useStore.getState().nodes;
+                        const aiNodes: MindMapNode[] = currentNodes.map((node) => ({
+                            id: node.id,
+                            label: String(node.data.label || ''),
+                            description: String(node.data.description || ''),
+                            nodeClass: ((node.data.nodeClass as MindMapNode['nodeClass']) || 'idea'),
+                            nodeType: (typeof node.type === 'string' ? node.type : 'expandable') as MindMapNode['nodeType'],
+                            items: Array.isArray(node.data.items)
+                                ? node.data.items as { id: string; text: string; completed: boolean }[]
+                                : undefined,
+                        }));
 
-                const history = (getMessagesForAI() as ChatMessage[]).slice(-4);
-                const response = await aiService.chat(
-                    goal,
-                    [...history, { role: 'user', content: sectionPrompt }],
-                    getScopedMindMapAsJSON(),
-                    undefined,
-                    undefined,
-                    { forceContextual: true, maxTokens: 900, temperature: 0.58 }
-                );
+                        const attemptPrompt = attempt === 0
+                            ? sectionPrompt
+                            : `${sectionPrompt}\nSecond pass: section still sparse. Add missing concrete nodes and improve weak placeholders.`;
+                        const response = await aiService.chat(
+                            goal,
+                            [...baseHistory, { role: 'user', content: attemptPrompt }],
+                            getScopedMindMapAsJSONForSection(sectionId),
+                            undefined,
+                            undefined,
+                            {
+                                forceContextual: true,
+                                preEnrichedUserPrompt: true,
+                                maxTokens: sectionNodeCount > 40 ? 820 : 1080,
+                                temperature: attempt === 0 ? 0.56 : 0.6
+                            }
+                        );
 
-                const parsed = parseAIResponse(
-                    response,
-                    goal,
-                    aiNodes,
-                    `intake_${Date.now()}`,
-                    sectionId,
-                    sectionPrompt
-                );
+                        const parsed = parseAIResponse(
+                            response,
+                            goal,
+                            aiNodes,
+                            `intake_${Date.now()}`,
+                            sectionId,
+                            attemptPrompt
+                        );
 
-                if (parsed.redirectTo) continue;
+                        if (parsed.redirectTo) {
+                            wasRedirected = true;
+                            break;
+                        }
+                        const quality = applyQualityGate(parsed.updatedMindMap, {
+                            goal,
+                            userPrompt: attemptPrompt,
+                            sectionLabel,
+                            sectionBriefText: `${sectionBriefText}${sectionBriefText ? ' | ' : ''}${intakeText}`,
+                            userConstraints,
+                            existingNodes: aiNodes,
+                        });
 
-                const quality = applyQualityGate(parsed.updatedMindMap, {
-                    goal,
-                    userPrompt: sectionPrompt,
-                    sectionLabel,
-                    sectionBriefText: `${sectionBriefText}${sectionBriefText ? ' | ' : ''}${intakeText}`,
-                    userConstraints,
-                    existingNodes: aiNodes,
-                });
+                        if (quality.updatedMindMap.nodes.length > 0) {
+                            setMindMapFromJSON(quality.updatedMindMap);
+                            qualityAddedCount += quality.updatedMindMap.nodes.length;
+                            await new Promise((resolve) => window.setTimeout(resolve, 0));
+                        }
+                        if (qualityAddedCount >= minNetAdds) break;
+                    }
 
-                if (quality.updatedMindMap.nodes.length > 0) {
-                    setMindMapFromJSON(quality.updatedMindMap);
-                    updatedSections += 1;
-                    addedNodes += quality.updatedMindMap.nodes.length;
+                    if (!wasRedirected) {
+                        const deficit = Math.max(0, minNetAdds - qualityAddedCount);
+                        if (deficit > 0) {
+                            const fallbackPatch = buildProjectIntakeFallbackPatch(
+                                sectionId,
+                                sectionLabel,
+                                {
+                                    objective,
+                                    audience: targetAudience,
+                                    constraints,
+                                    successSignal,
+                                },
+                                Math.min(4, deficit)
+                            );
+                            if (fallbackPatch.nodes.length > 0) {
+                                setMindMapFromJSON(fallbackPatch);
+                                qualityAddedCount += fallbackPatch.nodes.length;
+                            }
+                        }
+                    }
+
+                    if (!wasRedirected && qualityAddedCount > 0) {
+                        updatedSections += 1;
+                        addedNodes += qualityAddedCount;
+                    }
+                } catch (error) {
+                    console.error(`[ChatPanel] intake section update failed (${sectionLabel})`, error);
+                } finally {
+                    setSectionLoading(sectionId, false);
                 }
 
                 setIntakeJob((prev) => ({
@@ -537,19 +894,23 @@ export default function ChatPanel() {
                         ...prev.results,
                         {
                             section: sectionLabel,
-                            added: quality.updatedMindMap.nodes.length,
+                            added: wasRedirected ? 0 : qualityAddedCount,
                         }
                     ],
                 }));
+
+                // Avoid long main-thread monopolization across many sections.
+                await new Promise((resolve) => window.setTimeout(resolve, 0));
             }
 
             setIntakeJob((prev) => ({ ...prev, status: 'done', currentSection: '' }));
             addMessage(
                 'assistant',
                 updatedSections > 0
-                    ? `Intake applied across ${updatedSections}/${sectionNodes.length} sections. Added ${addedNodes} focused nodes. Open sections to inspect updates.`
+                    ? `Intake applied across ${updatedSections}/${selectedSections.length} sections. Added ${addedNodes} focused nodes and filled sparse sections with fallback coverage when needed.`
                     : 'Intake saved. I could not find high-quality additions yet, so I kept the map stable.'
             );
+            setShowIntakeForm(false);
         } catch (error) {
             console.error('[ChatPanel] project intake update failed', error);
             setIntakeJob((prev) => ({ ...prev, status: 'error', currentSection: '' }));
@@ -567,9 +928,10 @@ export default function ChatPanel() {
         addMessage,
         getMessagesForAI,
         goal,
-        getScopedMindMapAsJSON,
+        getScopedMindMapAsJSONForSection,
         userConstraints,
-        setMindMapFromJSON
+        setMindMapFromJSON,
+        setSectionLoading
     ]);
 
     // Auto-scroll to bottom
@@ -598,17 +960,150 @@ export default function ChatPanel() {
         if (!hasBaseScaffold || projectIntakePrompted) return;
 
         setProjectIntakePrompted(true);
-        setShowIntakeForm(true);
         addMessage(
             'assistant',
-            'Base sections are ready. Fill the project intake card so I can improve every section using shared context.'
+            'Base sections are ready. Open Project Intake when you want me to improve every section using shared context.'
         );
     }, [nodes, goal, projectIntakePrompted, setProjectIntakePrompted, addMessage]);
 
+    const runInfoMicroUpdates = useCallback(async (
+        infoText: string,
+        analysis: ChatIntentAnalysis
+    ): Promise<{ addedNodes: number; touchedSections: string[]; failedSections: number }> => {
+        let addedNodes = 0;
+        let failedSections = 0;
+        const touchedSections: string[] = [];
+        const projectIntakeText = buildProjectIntakeText(projectIntake);
+
+        for (const sectionId of analysis.impactedSectionIds) {
+            const history = (getMessagesForAI() as ChatMessage[]).slice(-2);
+            const state = useStore.getState();
+            const sectionNode = state.nodes.find((node) => node.id === sectionId);
+            const sectionLabel = String(sectionNode?.data?.label || 'Section');
+            const sectionBrief = state.sectionBriefs[sectionId];
+            const sectionBriefText = buildSectionBriefText(sectionBrief);
+            if (!sectionNode) continue;
+
+            setSectionLoading(sectionId, true);
+            try {
+                const aiNodes: MindMapNode[] = state.nodes.map((node) => ({
+                    id: node.id,
+                    label: String(node.data.label || ''),
+                    description: String(node.data.description || ''),
+                    nodeClass: ((node.data.nodeClass as MindMapNode['nodeClass']) || 'idea'),
+                    nodeType: (typeof node.type === 'string' ? node.type : 'expandable') as MindMapNode['nodeType'],
+                    items: Array.isArray(node.data.items) ? node.data.items as { id: string; text: string; completed: boolean }[] : undefined,
+                    decisionOptions: Array.isArray(node.data.decisionOptions) ? node.data.decisionOptions as string[] : undefined,
+                    chosenOption: typeof node.data.chosenOption === 'string' ? node.data.chosenOption as string : undefined,
+                    tradeoffItems: Array.isArray(node.data.tradeoffItems)
+                        ? node.data.tradeoffItems as { id: string; label: string; impact: number; effort: number; risk: number; time: number }[]
+                        : undefined,
+                }));
+
+                const prompt = [
+                    `[Section: ${sectionLabel}]`,
+                    `User shared new information that affects ${analysis.impactBand} scope.`,
+                    `New Info: ${infoText}`,
+                    projectIntakeText ? `Project Intake: ${projectIntakeText}` : '',
+                    sectionBriefText ? `Section Brief: ${sectionBriefText}` : '',
+                    userConstraints.length > 0 ? `Global Constraints: ${userConstraints.join(' | ')}` : '',
+                    `Integrate this info with a micro-update: add at most ${analysis.maxNodesPerSection} high-value nodes in this section.`,
+                    'Do not regenerate the section. Do not rewrite unrelated nodes.',
+                    'Prefer concrete execution/decision/question/metric nodes when relevant.'
+                ].filter(Boolean).join('\n');
+
+                const response = await aiService.chat(
+                    goal,
+                    [...history, { role: 'user', content: prompt }],
+                    getScopedMindMapAsJSONForSection(sectionId),
+                    undefined,
+                    undefined,
+                    {
+                        forceContextual: true,
+                        preEnrichedUserPrompt: true,
+                        maxTokens: 720,
+                        temperature: 0.54,
+                    }
+                );
+
+                const parsed = parseAIResponse(
+                    response,
+                    goal,
+                    aiNodes,
+                    `info_${Date.now()}`,
+                    sectionId,
+                    prompt
+                );
+
+                if (parsed.redirectTo || parsed.updatedMindMap.nodes.length === 0) {
+                    continue;
+                }
+
+                const quality = applyQualityGate(parsed.updatedMindMap, {
+                    goal,
+                    userPrompt: prompt,
+                    sectionLabel,
+                    sectionBriefText: `${sectionBriefText}${sectionBriefText && projectIntakeText ? ' | ' : ''}${projectIntakeText}`,
+                    userConstraints,
+                    existingNodes: aiNodes,
+                });
+
+                const promptTokens = normalizeTokenSet(`${infoText} ${sectionLabel} ${projectIntakeText} ${sectionBriefText}`);
+                const strictNodes = quality.updatedMindMap.nodes.filter((node) => {
+                    const label = String(node.label || '').trim();
+                    if (/^[a-z]?\d{1,4}$/i.test(label) || /^t\d{1,4}$/i.test(label)) return false;
+                    const nodeTokens = normalizeTokenSet(`${node.label} ${node.description || ''}`);
+                    const overlap = overlapCount(nodeTokens, promptTokens);
+                    const importantType = ['question', 'checklist', 'metric', 'decision', 'tradeoff'].includes(node.nodeType || '');
+                    return overlap > 0 || importantType;
+                });
+                const limitedNodes = strictNodes.slice(0, analysis.maxNodesPerSection);
+                if (limitedNodes.length === 0) continue;
+
+                const newIds = new Set(limitedNodes.map((node) => node.id));
+                const existingIds = new Set(aiNodes.map((node) => node.id));
+                const limitedEdges = quality.updatedMindMap.edges
+                    .filter((edge) =>
+                        (newIds.has(edge.source) || existingIds.has(edge.source) || edge.source === sectionId) &&
+                        (newIds.has(edge.target) || existingIds.has(edge.target))
+                    )
+                    .slice(0, Math.max(analysis.maxNodesPerSection * 3, 4));
+
+                const linkedTargets = new Set(limitedEdges.map((edge) => edge.target));
+                limitedNodes.forEach((node) => {
+                    if (!linkedTargets.has(node.id)) {
+                        limitedEdges.push({ source: sectionId, target: node.id });
+                    }
+                });
+
+                setMindMapFromJSON({
+                    nodes: limitedNodes,
+                    edges: limitedEdges,
+                });
+                addedNodes += limitedNodes.length;
+                touchedSections.push(sectionLabel);
+            } catch (error) {
+                failedSections += 1;
+                console.error(`[ChatPanel] info micro-update failed (${sectionLabel})`, error);
+            } finally {
+                setSectionLoading(sectionId, false);
+                await new Promise((resolve) => window.setTimeout(resolve, 0));
+            }
+        }
+
+        return { addedNodes, touchedSections, failedSections };
+    }, [
+        getMessagesForAI,
+        projectIntake,
+        userConstraints,
+        goal,
+        getScopedMindMapAsJSONForSection,
+        setMindMapFromJSON,
+        setSectionLoading,
+    ]);
+
     // V44: Process AI response using parser with robust fallback
     const processAIResponse = useCallback((response: string, isFirstTurn: boolean = false) => {
-        console.log("V44 DEBUG: Raw AI response:", response);
-
         const currentNodes = useStore.getState().nodes;
         const activeSectionId = useStore.getState().activeSection;
         const currentSectionNode = activeSectionId
@@ -634,7 +1129,6 @@ export default function ChatPanel() {
             const jsonMatch = response.match(/\{[\s\S]*\}/);
             if (jsonMatch) {
                 parsedData = JSON.parse(jsonMatch[0]);
-                console.log("V44 DEBUG: Parsed as JSON:", parsedData);
             }
         } catch {
             // Not JSON, use text parser
@@ -642,9 +1136,7 @@ export default function ChatPanel() {
 
         // If no JSON or JSON failed, use text parser
         if (!parsedData || !parsedData.assistantResponse) {
-            console.log("V44 DEBUG: Using text parser");
             parsedData = parseAIResponse(response, goal, aiNodes, newNodeId, parentId, lastUserMsg);
-            console.log("V44 DEBUG: Parsed result:", parsedData);
         }
 
         if (!parsedData) {
@@ -720,12 +1212,16 @@ export default function ChatPanel() {
                     source: 'chat',
                 });
             } else {
-                console.log("V44 DEBUG: Updating mind map:", parsedData.updatedMindMap);
                 setMindMapFromJSON(parsedData.updatedMindMap);
             }
-        } else if (!shouldOfferRedirect && !isFirstTurn && lastUserMsg && !proposalMode) {
+        } else if (
+            !shouldOfferRedirect &&
+            !isFirstTurn &&
+            lastUserMsg &&
+            !proposalMode &&
+            ['instruction', 'radical'].includes(lastIntentRef.current?.type || '')
+        ) {
             // V44: Fallback - create node from user message anyway
-            console.log("V44 DEBUG: Fallback - creating node from user message");
             const fallbackData = {
                 nodes: [{ id: newNodeId, label: lastUserMsg.slice(0, 30), description: lastUserMsg }],
                 edges: [{ source: parentId, target: newNodeId }]
@@ -845,11 +1341,74 @@ export default function ChatPanel() {
 
         // V42: Store last user message for parser (using the un-prefixed one for node generation fallback)
         lastUserMessageRef.current = aiText;
+        const intentAnalysis = analyzeChatIntent(
+            aiText,
+            useStore.getState().nodes as unknown as SectionScopeNode[],
+            activeSectionId
+        );
+        lastIntentRef.current = intentAnalysis;
+
+        if (intentAnalysis.shouldMicroUpdate) {
+            try {
+                const result = await runInfoMicroUpdates(aiText, intentAnalysis);
+                const touched = result.touchedSections.slice(0, 4).join(', ');
+                const summaryText = result.addedNodes > 0
+                    ? `Integrated that information into ${result.touchedSections.length} section${result.touchedSections.length > 1 ? 's' : ''}${touched ? ` (${touched})` : ''}. Added ${result.addedNodes} focused nodes without regenerating sections.`
+                    : `Captured that information. I tagged ${intentAnalysis.impactedSectionLabels.length} relevant section${intentAnalysis.impactedSectionLabels.length > 1 ? 's' : ''} and will use it for subsequent planning updates.`;
+                const failureNote = result.failedSections > 0
+                    ? ` ${result.failedSections} section update${result.failedSections > 1 ? 's' : ''} failed and can be retried.`
+                    : '';
+
+                let conversational = '';
+                try {
+                    const conversationalPrompt = [
+                        'Respond to the user in 1-2 short sentences.',
+                        'Answer any direct question they asked.',
+                        `User message: ${aiText}`,
+                        `System action summary: ${summaryText}${failureNote}`,
+                        'Do not output mindmap syntax, nodes, edges, or code blocks.'
+                    ].join('\n');
+                    const reply = await aiService.chat(
+                        goal,
+                        [{ role: 'user', content: conversationalPrompt }],
+                        getScopedMindMapAsJSON(),
+                        undefined,
+                        undefined,
+                        {
+                            forceContextual: true,
+                            preEnrichedUserPrompt: true,
+                            maxTokens: 220,
+                            temperature: 0.45,
+                        }
+                    );
+                    conversational = extractConversationalText(reply);
+                } catch {
+                    conversational = '';
+                }
+                const responseText = conversational || `${summaryText}${failureNote}`;
+
+                addMessage('assistant', responseText, [
+                    'Anything else to add?',
+                    'Show me gaps now',
+                    'Prioritize next moves',
+                ], {
+                    nodesAdded: result.addedNodes > 0 ? result.addedNodes : undefined,
+                    sectionName: intentAnalysis.impactedSectionLabels.join(', ') || goal || 'Project',
+                });
+            } catch (error) {
+                console.error('[ChatPanel] info update pipeline failed', error);
+                addMessage('assistant', 'I captured your update, but applying section-level improvements failed this time. Try once more.');
+            } finally {
+                setIsLoading(false);
+                setLoadingText('');
+                setProgress(0);
+            }
+            return;
+        }
 
         try {
             // Get messages and cast to ChatMessage[] for AI service
             const chatHistory = getMessagesForAI() as ChatMessage[];
-            console.log("V42 DEBUG: Chat history being sent:", chatHistory);
 
             const activeSection = activeSectionId ? useStore.getState().nodes.find((n) => n.id === activeSectionId) : undefined;
             const sectionBrief = activeSectionId ? sectionBriefs[activeSectionId] : undefined;
@@ -857,9 +1416,14 @@ export default function ChatPanel() {
             const sectionBriefDigest = buildSectionBriefDigest(sectionBriefs, activeSectionId);
             const projectIntakeText = buildProjectIntakeText(projectIntake);
             const constraintText = userConstraints.length > 0 ? `Constraints: ${userConstraints.join(' | ')}` : '';
+            const scopeTag = intentAnalysis.impactedSectionLabels.length > 0
+                ? `Impact Scope: ${intentAnalysis.impactBand} (${intentAnalysis.impactedSectionLabels.join(' | ')})`
+                : `Impact Scope: ${intentAnalysis.impactBand}`;
             const enrichedText = [
                 prefix ? `[Section: ${String(activeSection?.data.label || '')}]` : '',
                 buildIntentPrompt(aiText),
+                buildIntentPolicyBlock(intentAnalysis),
+                scopeTag,
                 projectIntakeText ? `Project Intake: ${projectIntakeText}` : '',
                 sectionBriefText ? `Section Brief: ${sectionBriefText}` : '',
                 sectionBriefDigest ? `Other section context: ${sectionBriefDigest}` : '',
@@ -873,13 +1437,17 @@ export default function ChatPanel() {
             }
 
             const currentMapJSON = getScopedMindMapAsJSON();
-            console.log("V42 DEBUG: Current map being sent:", currentMapJSON);
 
-            const response = await aiService.chat(goal, chatHistory, currentMapJSON);
+            const response = await aiService.chat(goal, chatHistory, currentMapJSON, undefined, undefined, {
+                preEnrichedUserPrompt: true,
+                forceContextual: true,
+                maxTokens: intentAnalysis.type === 'question' ? 1250 : intentAnalysis.type === 'radical' ? 1900 : 1500,
+                temperature: intentAnalysis.type === 'question' ? 0.48 : intentAnalysis.type === 'radical' ? 0.62 : 0.55,
+            });
             processAIResponse(response, false);
 
         } catch (error) {
-            console.error("V34 DEBUG: AI Error:", error);
+            console.error('[ChatPanel] AI Error', error);
             addMessage('assistant', "Sorry, I encountered an error connecting to the AI brain.");
             setIsLoading(false);
         }
@@ -910,6 +1478,19 @@ export default function ChatPanel() {
                     </p>
                     <div className="flex items-center gap-2">
                         <button
+                            onClick={() => setShowIntakeForm((prev) => !prev)}
+                            disabled={isIntakeSubmitting}
+                            className={clsx(
+                                "text-[11px] px-2.5 py-1.5 rounded-full border transition-colors disabled:opacity-50",
+                                showIntakeForm
+                                    ? "border-blue-400/30 bg-blue-500/10 text-blue-200"
+                                    : "border-blue-400/20 bg-transparent text-blue-300/85 hover:bg-blue-500/10"
+                            )}
+                            title="Open or collapse the project intake card"
+                        >
+                            {showIntakeForm ? 'Intake Open' : 'Project Intake'}
+                        </button>
+                        <button
                             onClick={() => setProposalMode(!proposalMode)}
                             className={clsx(
                                 "text-[11px] px-2.5 py-1.5 rounded-full border transition-colors",
@@ -927,6 +1508,21 @@ export default function ChatPanel() {
                         </div>
                     </div>
                 </div>
+                {(isLoading || isIntakeSubmitting) && (
+                    <div className="h-1 w-full overflow-hidden rounded-full bg-white/10">
+                        <div
+                            className={clsx(
+                                "h-full transition-all",
+                                isIntakeSubmitting ? "bg-blue-400" : "bg-emerald-400 animate-pulse"
+                            )}
+                            style={{
+                                width: isIntakeSubmitting
+                                    ? `${intakeJob.total > 0 ? (intakeJob.processed / intakeJob.total) * 100 : 8}%`
+                                    : `${progress > 0 && progress <= 1 ? progress * 100 : 30}%`
+                            }}
+                        />
+                    </div>
+                )}
             </div>
 
             <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-6 scroll-smooth z-0 relative">

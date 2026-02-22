@@ -71,6 +71,9 @@ export const useForceLayout = (visibleNodes: Node[], visibleEdges: Edge[]) => {
         const scopedNodes = visibleNodesRef.current;
         const scopedEdges = visibleEdgesRef.current;
         if (scopedNodes.length === 0) return;
+        if (scopedNodes.length > 140) return;
+
+        const isLargeGraph = scopedNodes.length > 80;
 
         // Prepare D3 data with class info, using scoped visible nodes only
         const d3Nodes: D3Node[] = scopedNodes.map((node) => ({
@@ -111,16 +114,17 @@ export const useForceLayout = (visibleNodes: Node[], visibleEdges: Edge[]) => {
         let lastUpdateTime = 0;
 
         const simulation = d3.forceSimulation(d3Nodes)
-            .force('charge', d3.forceManyBody().strength(-1000)) // increase repulsion slightly
-            .force('center', d3.forceCenter(0, 300).strength(0.05)) // stronger center pull
-            .force('collide', d3.forceCollide().radius(320).strength(0.8)) // increased radius to prevent overlap
-            .force('link', d3.forceLink<D3Node, D3Edge>(d3Edges).id((d) => d.id).distance(350).strength(0.5))
+            .force('charge', d3.forceManyBody().strength(isLargeGraph ? -560 : -1000))
+            .force('center', d3.forceCenter(0, 300).strength(isLargeGraph ? 0.03 : 0.05))
+            .force('collide', d3.forceCollide().radius(isLargeGraph ? 240 : 320).strength(isLargeGraph ? 0.6 : 0.8))
+            .force('link', d3.forceLink<D3Node, D3Edge>(d3Edges).id((d) => d.id).distance(isLargeGraph ? 280 : 350).strength(isLargeGraph ? 0.42 : 0.5))
             .force('classCluster', classClusterForce) // V56: Class-based clustering
             .alpha(1)
-            .alphaDecay(0.08) // Faster decay — nodes settle in ~3-4 seconds
+            .alphaDecay(isLargeGraph ? 0.12 : 0.08)
             .on('tick', () => {
                 const now = Date.now();
-                if (now - lastUpdateTime < 32) return; // Limit to ~30fps
+                const frameMs = isLargeGraph ? 50 : 32;
+                if (now - lastUpdateTime < frameMs) return;
                 lastUpdateTime = now;
 
                 const positions = new Map(d3Nodes.map(d => [d.id, { x: d.x, y: d.y }]));
@@ -137,10 +141,10 @@ export const useForceLayout = (visibleNodes: Node[], visibleEdges: Edge[]) => {
 
         simulationRef.current = simulation;
 
-        // Hard stop after 4 seconds — prevent indefinite jittering
+        // Hard stop — prevent indefinite jittering and reduce CPU on large maps.
         stopTimerRef.current = setTimeout(() => {
             simulation.stop();
-        }, 4000);
+        }, isLargeGraph ? 1800 : 3200);
 
         return () => {
             if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
