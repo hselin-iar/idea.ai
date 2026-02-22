@@ -90,7 +90,36 @@ export interface Message {
         sectionName?: string;
         redirectTo?: string;
         redirectReason?: string;
+        proposalId?: string;
+        proposalSummary?: string;
+        rejectedNodes?: number;
     };
+}
+
+export interface SectionBrief {
+    sectionId: string;
+    sectionLabel: string;
+    focus: string;
+    mustInclude: string;
+    updatedAt: number;
+}
+
+export interface ProjectIntake {
+    objective: string;
+    targetAudience: string;
+    constraints: string;
+    successSignal: string;
+    updatedAt: number;
+}
+
+export interface AIPatchProposal {
+    id: string;
+    createdAt: number;
+    status: 'pending' | 'approved' | 'rejected';
+    summary: string;
+    sectionId?: string;
+    source?: 'chat' | 'brief' | 'background';
+    mapData: { nodes: AINodeData[]; edges: AIEdgeData[]; nodeUpdates?: AINodeUpdateData[] };
 }
 
 // V38: History state for Undo/Redo
@@ -110,6 +139,12 @@ interface SessionData {
     messages?: Message[];
     nodes?: Node[];
     edges?: Edge[];
+    sectionBriefs?: Record<string, SectionBrief>;
+    sectionBriefDismissed?: Record<string, boolean>;
+    projectIntake?: ProjectIntake | null;
+    projectIntakePrompted?: boolean;
+    userConstraints?: string[];
+    proposalMode?: boolean;
 }
 
 const MAX_HISTORY = 50; // Maximum number of states to remember for undo/redo
@@ -153,6 +188,32 @@ interface AppState {
     setMessages: (messages: Message[]) => void;
     getMessagesForAI: () => { role: string, content: string }[];
     clearChat: () => void; // Fix #44
+
+    // Section briefs and user control
+    sectionBriefs: Record<string, SectionBrief>;
+    setSectionBrief: (sectionId: string, brief: Omit<SectionBrief, 'sectionId' | 'updatedAt'>) => void;
+    clearSectionBrief: (sectionId: string) => void;
+    sectionBriefDraftFor: string | null;
+    openSectionBriefDraft: (sectionId: string) => void;
+    closeSectionBriefDraft: () => void;
+    sectionBriefDismissed: Record<string, boolean>;
+    setSectionBriefDismissed: (sectionId: string, dismissed: boolean) => void;
+    projectIntake: ProjectIntake | null;
+    setProjectIntake: (intake: Omit<ProjectIntake, 'updatedAt'>) => void;
+    clearProjectIntake: () => void;
+    projectIntakePrompted: boolean;
+    setProjectIntakePrompted: (prompted: boolean) => void;
+    userConstraints: string[];
+    addUserConstraint: (constraint: string) => void;
+    removeUserConstraint: (constraint: string) => void;
+
+    // AI proposal mode
+    proposalMode: boolean;
+    setProposalMode: (enabled: boolean) => void;
+    proposals: Record<string, AIPatchProposal>;
+    createProposal: (proposal: Omit<AIPatchProposal, 'id' | 'createdAt' | 'status'>) => string;
+    approveProposal: (proposalId: string) => void;
+    rejectProposal: (proposalId: string) => void;
 
     // Session State
     goal: string;
@@ -545,7 +606,7 @@ export const useStore = create<AppState>()(
                             nodeType = 'section'; // Force section class to use SectionNode component
                         }
                         const checklistItems = nodeType === 'checklist'
-                            ? (n.items && n.items.length > 0 ? n.items : buildChecklistItems(n.label))
+                            ? (n.items && n.items.length > 0 ? n.items : buildChecklistItems())
                             : n.items;
 
                         newNodes.push({
@@ -609,11 +670,13 @@ export const useStore = create<AppState>()(
                 const getNodeClass = (node?: Node): string =>
                     String(node?.data?.nodeClass || '').toLowerCase();
 
-                const buildChecklistItems = (label: string) => [
-                    { id: `item-${Date.now()}-0`, text: `Define scope for ${label}`, completed: false },
-                    { id: `item-${Date.now()}-1`, text: `Execute core steps for ${label}`, completed: false },
-                    { id: `item-${Date.now()}-2`, text: `Review outcomes for ${label}`, completed: false },
-                ];
+                function buildChecklistItems() {
+                    return [
+                        { id: `item-${Date.now()}-0`, text: 'Define scope', completed: false },
+                        { id: `item-${Date.now()}-1`, text: 'Execute core steps', completed: false },
+                        { id: `item-${Date.now()}-2`, text: 'Review outcomes', completed: false },
+                    ];
+                }
 
                 const chooseBestSectionParent = (targetNode?: Node): string | undefined => {
                     if (sectionNodes.length === 0) return undefined;
@@ -849,6 +912,7 @@ export const useStore = create<AppState>()(
                     // Section Mode: active section and all children
                     const sectionDescendantIds = new Set<string>();
                     const adjacency = new Map<string, string[]>();
+                    const nodeById = new Map(state.nodes.map((node) => [node.id, node]));
                     state.edges.forEach((edge) => {
                         const children = adjacency.get(edge.source) || [];
                         children.push(edge.target);
@@ -862,7 +926,10 @@ export const useStore = create<AppState>()(
                         sectionDescendantIds.add(current);
                         const children = adjacency.get(current) || [];
                         for (const child of children) {
-                            if (!sectionDescendantIds.has(child)) {
+                            const childNode = nodeById.get(child);
+                            const isGoal = childNode?.data.nodeClass === 'goal';
+                            const isOtherSection = (childNode?.data.nodeClass === 'section' || childNode?.type === 'section') && child !== activeSection;
+                            if (!isGoal && !isOtherSection && !sectionDescendantIds.has(child)) {
                                 queue.push(child);
                             }
                         }
@@ -922,6 +989,103 @@ export const useStore = create<AppState>()(
                 set({ messages: [] });
             },
 
+            sectionBriefs: {},
+            setSectionBrief: (sectionId, brief) => set((state) => ({
+                sectionBriefs: {
+                    ...state.sectionBriefs,
+                    [sectionId]: {
+                        sectionId,
+                        ...brief,
+                        updatedAt: Date.now(),
+                    }
+                },
+                sectionBriefDismissed: {
+                    ...state.sectionBriefDismissed,
+                    [sectionId]: false,
+                },
+            })),
+            clearSectionBrief: (sectionId) => set((state) => {
+                const next = { ...state.sectionBriefs };
+                delete next[sectionId];
+                return { sectionBriefs: next };
+            }),
+            sectionBriefDraftFor: null,
+            openSectionBriefDraft: (sectionId) => set({ sectionBriefDraftFor: sectionId }),
+            closeSectionBriefDraft: () => set({ sectionBriefDraftFor: null }),
+            sectionBriefDismissed: {},
+            setSectionBriefDismissed: (sectionId, dismissed) => set((state) => ({
+                sectionBriefDismissed: {
+                    ...state.sectionBriefDismissed,
+                    [sectionId]: dismissed,
+                }
+            })),
+            projectIntake: null,
+            setProjectIntake: (intake) => set({
+                projectIntake: {
+                    ...intake,
+                    updatedAt: Date.now(),
+                }
+            }),
+            clearProjectIntake: () => set({ projectIntake: null }),
+            projectIntakePrompted: false,
+            setProjectIntakePrompted: (prompted) => set({ projectIntakePrompted: prompted }),
+            userConstraints: [],
+            addUserConstraint: (constraint) => {
+                const normalized = constraint.trim();
+                if (!normalized) return;
+                set((state) => {
+                    if (state.userConstraints.some((item) => item.toLowerCase() === normalized.toLowerCase())) {
+                        return state;
+                    }
+                    return { userConstraints: [...state.userConstraints, normalized] };
+                });
+            },
+            removeUserConstraint: (constraint) => set((state) => ({
+                userConstraints: state.userConstraints.filter(
+                    (item) => item.toLowerCase() !== constraint.trim().toLowerCase()
+                )
+            })),
+
+            proposalMode: true,
+            setProposalMode: (enabled) => set({ proposalMode: enabled }),
+            proposals: {},
+            createProposal: (proposal) => {
+                const id = uuidv4();
+                set((state) => ({
+                    proposals: {
+                        ...state.proposals,
+                        [id]: {
+                            id,
+                            createdAt: Date.now(),
+                            status: 'pending',
+                            ...proposal,
+                        }
+                    }
+                }));
+                return id;
+            },
+            approveProposal: (proposalId) => {
+                const proposal = get().proposals[proposalId];
+                if (!proposal || proposal.status !== 'pending') return;
+                get().setMindMapFromJSON(proposal.mapData);
+                set((state) => ({
+                    proposals: {
+                        ...state.proposals,
+                        [proposalId]: { ...proposal, status: 'approved' }
+                    }
+                }));
+            },
+            rejectProposal: (proposalId) => {
+                const proposal = get().proposals[proposalId];
+                if (!proposal || proposal.status !== 'pending') return;
+                set((state) => ({
+                    proposals: {
+                        ...state.proposals,
+                        [proposalId]: { ...proposal, status: 'rejected' }
+                    }
+                }));
+            },
+
             goal: '',
 
             setGoal: (goal) => set({ goal }),
@@ -937,6 +1101,14 @@ export const useStore = create<AppState>()(
                     nodes: nextNodes,
                     edges: data.edges || [],
                     activeSection: preservedActiveSection,
+                    sectionBriefDraftFor: null,
+                    proposals: {},
+                    sectionBriefs: data.sectionBriefs || {},
+                    sectionBriefDismissed: data.sectionBriefDismissed || {},
+                    projectIntake: data.projectIntake || null,
+                    projectIntakePrompted: data.projectIntakePrompted ?? false,
+                    userConstraints: data.userConstraints || [],
+                    proposalMode: data.proposalMode ?? state.proposalMode,
                 };
             }),
             resetSessionState: () => set({
@@ -945,6 +1117,13 @@ export const useStore = create<AppState>()(
                 nodes: [],
                 edges: [],
                 activeSection: null,
+                sectionBriefs: {},
+                sectionBriefDraftFor: null,
+                sectionBriefDismissed: {},
+                projectIntake: null,
+                projectIntakePrompted: false,
+                userConstraints: [],
+                proposals: {},
                 past: [],
                 future: [],
             }),
@@ -959,6 +1138,7 @@ export const useStore = create<AppState>()(
             partialize: (state) => ({
                 // Persist only global UI preference, not session data.
                 thinkingMode: state.thinkingMode,
+                proposalMode: state.proposalMode,
             }),
         }
     )

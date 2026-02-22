@@ -2,12 +2,21 @@ import { initializeApp, getApps, FirebaseApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 
-// Fallback logic for build time or missing keys
-const getEnv = (key: string, mock: string) => {
-    return process.env[key] || mock;
-};
+const requiredKeys = [
+    "NEXT_PUBLIC_FIREBASE_API_KEY",
+    "NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN",
+    "NEXT_PUBLIC_FIREBASE_PROJECT_ID",
+    "NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET",
+    "NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID",
+    "NEXT_PUBLIC_FIREBASE_APP_ID",
+] as const;
+
+const getEnv = (key: string, fallback = '') => process.env[key] || fallback;
+
+export const isFirebaseConfigured = requiredKeys.every((key) => !!getEnv(key));
 
 const firebaseConfig = {
+    // Keep app bootable without env vars; cloud auth/sync stays gated by isFirebaseConfigured.
     apiKey: getEnv("NEXT_PUBLIC_FIREBASE_API_KEY", "mock_key"),
     authDomain: getEnv("NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN", "mock_domain"),
     projectId: getEnv("NEXT_PUBLIC_FIREBASE_PROJECT_ID", "mock_project"),

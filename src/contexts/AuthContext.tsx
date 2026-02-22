@@ -8,7 +8,7 @@ import {
     signOut as firebaseSignOut,
     onAuthStateChanged
 } from 'firebase/auth';
-import { auth } from '@/lib/firebase';
+import { auth, isFirebaseConfigured } from '@/lib/firebase';
 
 interface AuthContextType {
     user: User | null;
@@ -33,6 +33,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }, []);
 
     const signInWithGoogle = async () => {
+        if (!isFirebaseConfigured) {
+            throw new Error('Firebase is not configured. Set NEXT_PUBLIC_FIREBASE_* variables.');
+        }
         try {
             const provider = new GoogleAuthProvider();
             await signInWithPopup(auth, provider);
@@ -43,6 +46,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
 
     const signOut = async () => {
+        if (!isFirebaseConfigured) return;
         try {
             await firebaseSignOut(auth);
         } catch (error) {

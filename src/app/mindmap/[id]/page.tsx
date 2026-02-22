@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from 'react';
 import { useParams } from 'next/navigation';
-import { useStore, type Message } from '@/lib/store';
+import { useStore, type Message, type ProjectIntake, type SectionBrief } from '@/lib/store';
 import ChatPanel from '@/components/Chat/ChatPanel';
 import MindMapBoard from '@/components/MindMap/MindMapBoard';
 import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
@@ -28,6 +28,12 @@ export default function WorkspacePage() {
     const messages = useStore((state) => state.messages);
     const nodes = useStore((state) => state.nodes);
     const edges = useStore((state) => state.edges);
+    const sectionBriefs = useStore((state) => state.sectionBriefs);
+    const sectionBriefDismissed = useStore((state) => state.sectionBriefDismissed);
+    const projectIntake = useStore((state) => state.projectIntake);
+    const projectIntakePrompted = useStore((state) => state.projectIntakePrompted);
+    const userConstraints = useStore((state) => state.userConstraints);
+    const proposalMode = useStore((state) => state.proposalMode);
 
     const [isSidebarOpen, setIsSidebarOpen] = useState(true);
     const [isLoaded, setIsLoaded] = useState(false);
@@ -41,11 +47,23 @@ export default function WorkspacePage() {
         messages?: Message[];
         nodes?: Node[];
         edges?: Edge[];
+        sectionBriefs?: Record<string, SectionBrief>;
+        sectionBriefDismissed?: Record<string, boolean>;
+        projectIntake?: ProjectIntake | null;
+        projectIntakePrompted?: boolean;
+        userConstraints?: string[];
+        proposalMode?: boolean;
     }) => JSON.stringify({
         goal: data.goal || '',
         messages: data.messages || [],
         nodes: data.nodes || [],
         edges: data.edges || [],
+        sectionBriefs: data.sectionBriefs || {},
+        sectionBriefDismissed: data.sectionBriefDismissed || {},
+        projectIntake: data.projectIntake || null,
+        projectIntakePrompted: data.projectIntakePrompted ?? false,
+        userConstraints: data.userConstraints || [],
+        proposalMode: data.proposalMode ?? true,
     });
 
     // 1. Data Loading Effect
@@ -67,7 +85,18 @@ export default function WorkspacePage() {
             // Firestore is canonical for signed-in users.
             const sessionRef = doc(db, 'users', user.uid, 'sessions', id);
             unsubscribe = onSnapshot(sessionRef, (sessionDoc) => {
-                let nextCore: { goal: string; messages: Message[]; nodes: Node[]; edges: Edge[] };
+                let nextCore: {
+                    goal: string;
+                    messages: Message[];
+                    nodes: Node[];
+                    edges: Edge[];
+                    sectionBriefs: Record<string, SectionBrief>;
+                    sectionBriefDismissed: Record<string, boolean>;
+                    projectIntake: ProjectIntake | null;
+                    projectIntakePrompted: boolean;
+                    userConstraints: string[];
+                    proposalMode: boolean;
+                };
                 if (sessionDoc.exists()) {
                     const data = sessionDoc.data();
                     nextCore = {
@@ -75,6 +104,12 @@ export default function WorkspacePage() {
                         messages: data.messages || [],
                         nodes: data.nodes || [],
                         edges: data.edges || [],
+                        sectionBriefs: data.sectionBriefs || {},
+                        sectionBriefDismissed: data.sectionBriefDismissed || {},
+                        projectIntake: data.projectIntake || null,
+                        projectIntakePrompted: data.projectIntakePrompted ?? false,
+                        userConstraints: data.userConstraints || [],
+                        proposalMode: data.proposalMode ?? true,
                     };
                 } else {
                     // New session document: start clean.
@@ -83,6 +118,12 @@ export default function WorkspacePage() {
                         messages: [],
                         nodes: [],
                         edges: [],
+                        sectionBriefs: {},
+                        sectionBriefDismissed: {},
+                        projectIntake: null,
+                        projectIntakePrompted: false,
+                        userConstraints: [],
+                        proposalMode: true,
                     };
                 }
 
@@ -108,6 +149,12 @@ export default function WorkspacePage() {
                         messages: data.messages || [],
                         nodes: data.nodes || [],
                         edges: data.edges || [],
+                        sectionBriefs: data.sectionBriefs || {},
+                        sectionBriefDismissed: data.sectionBriefDismissed || {},
+                        projectIntake: data.projectIntake || null,
+                        projectIntakePrompted: data.projectIntakePrompted ?? false,
+                        userConstraints: data.userConstraints || [],
+                        proposalMode: data.proposalMode ?? true,
                     };
                     setSessionData(nextCore);
                     lastSyncedCoreRef.current = serializeSessionCore(nextCore);
@@ -133,7 +180,18 @@ export default function WorkspacePage() {
         if (authLoading || isHydratingRef.current || !isLoaded) return;
 
         const saveData = async () => {
-            const core = { goal, messages, nodes, edges };
+            const core = {
+                goal,
+                messages,
+                nodes,
+                edges,
+                sectionBriefs,
+                sectionBriefDismissed,
+                projectIntake,
+                projectIntakePrompted,
+                userConstraints,
+                proposalMode
+            };
             const serializedCore = serializeSessionCore(core);
             if (serializedCore === lastSyncedCoreRef.current) return;
 
@@ -143,6 +201,12 @@ export default function WorkspacePage() {
                 messages,
                 nodes,
                 edges,
+                sectionBriefs,
+                sectionBriefDismissed,
+                projectIntake,
+                projectIntakePrompted,
+                userConstraints,
+                proposalMode,
                 updatedAt: Date.now(),
             };
 
@@ -166,7 +230,22 @@ export default function WorkspacePage() {
         const timeoutId = setTimeout(saveData, 1000); // 1s debounce
         return () => clearTimeout(timeoutId);
 
-    }, [id, user, authLoading, isLoaded, goal, messages, nodes, edges]);
+    }, [
+        id,
+        user,
+        authLoading,
+        isLoaded,
+        goal,
+        messages,
+        nodes,
+        edges,
+        sectionBriefs,
+        sectionBriefDismissed,
+        projectIntake,
+        projectIntakePrompted,
+        userConstraints,
+        proposalMode
+    ]);
 
     if (authLoading || !isLoaded) {
         return <div className="flex h-screen items-center justify-center bg-zinc-950 text-zinc-500">

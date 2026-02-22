@@ -4,6 +4,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { LogIn, LogOut, User as UserIcon } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { FirebaseError } from 'firebase/app';
+import { isFirebaseConfigured } from '@/lib/firebase';
 
 export default function LoginButton() {
     const { user, signInWithGoogle, signOut, loading } = useAuth();
@@ -84,6 +85,10 @@ export default function LoginButton() {
     }
 
     const signIn = async () => {
+        if (!isFirebaseConfigured) {
+            alert("Firebase is not configured. Add NEXT_PUBLIC_FIREBASE_* values in .env.local.");
+            return;
+        }
         try {
             await signInWithGoogle();
         } catch (e: unknown) {

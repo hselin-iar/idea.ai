@@ -11,6 +11,9 @@ interface SectionNodeData extends Record<string, unknown> {
 
 export default function SectionNode({ data, id }: NodeProps<Node<SectionNodeData>>) {
     const setActiveSection = useStore((state) => state.setActiveSection);
+    const openSectionBriefDraft = useStore((state) => state.openSectionBriefDraft);
+    const setSectionBriefDismissed = useStore((state) => state.setSectionBriefDismissed);
+    const sectionBriefs = useStore((state) => state.sectionBriefs);
 
     // Count all descendants for the badge
     const edges = useStore((state) => state.edges);
@@ -38,7 +41,12 @@ export default function SectionNode({ data, id }: NodeProps<Node<SectionNodeData
 
     return (
         <div
-            onClick={() => setActiveSection(id)}
+            onClick={() => {
+                setActiveSection(id);
+                if (!sectionBriefs[id]) {
+                    openSectionBriefDraft(id);
+                }
+            }}
             className="group relative section-card cursor-pointer hover:shadow-lg transition-all flex flex-col h-full min-h-[140px]"
         >
             <Handle type="target" position={Position.Top} className="opacity-0" />
@@ -49,8 +57,21 @@ export default function SectionNode({ data, id }: NodeProps<Node<SectionNodeData
                         <FolderOpen size={14} />
                         Section
                     </div>
-                    <div className="bg-white/5 px-2 py-0.5 rounded-full text-[10px] text-text-muted transition-colors font-medium">
-                        {childCount} items
+                    <div className="flex items-center gap-2">
+                        <div className="bg-white/5 px-2 py-0.5 rounded-full text-[10px] text-text-muted transition-colors font-medium">
+                            {childCount} items
+                        </div>
+                        <button
+                            onClick={(event) => {
+                                event.stopPropagation();
+                                setSectionBriefDismissed(id, false);
+                                openSectionBriefDraft(id);
+                            }}
+                            className="rounded-md border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-200 hover:bg-white/10"
+                            title="Add section info"
+                        >
+                            Info
+                        </button>
                     </div>
                 </div>
 

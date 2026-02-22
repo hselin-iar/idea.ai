@@ -10,6 +10,8 @@ import {
     BackgroundVariant,
     Edge,
     Connection,
+    getNodesBounds,
+    getViewportForBounds,
 } from '@xyflow/react';
 import { toPng } from 'html-to-image';
 import { Download, Undo2, Redo2 } from 'lucide-react';
@@ -22,7 +24,11 @@ import '@xyflow/react/dist/style.css';
 import { useStore } from '@/lib/store';
 import { useForceLayout } from '@/hooks/useForceLayout';
 import SectionBreadcrumb from '../Navigation/SectionBreadcrumb'; // New Phase B component
-import { useMemo, useState, useEffect } from 'react';
+import SectionBriefPanel from '../Navigation/SectionBriefPanel';
+import { useMemo, useState, useEffect, useCallback } from 'react';
+import { aiService, ChatMessage, MindMapNode, parseAIResponse } from '@/services/ai';
+import { applyQualityGate } from '@/lib/aiQuality';
+import type { ProjectIntake, SectionBrief } from '@/lib/store';
 
 const nodeTypes = {
     expandable: ExpandableNode,
@@ -32,37 +38,60 @@ const nodeTypes = {
     section: SectionNode,
 };
 
+function buildSectionBriefText(brief?: SectionBrief): string {
+    if (!brief) return '';
+    return [
+        `Focus: ${brief.focus}`,
+        `Must include: ${brief.mustInclude}`
+    ].filter((line) => !line.endsWith(': ')).join(' | ');
+}
+
+function buildProjectIntakeText(intake?: ProjectIntake | null): string {
+    if (!intake) return '';
+    return [
+        `Objective: ${intake.objective}`,
+        `Target audience: ${intake.targetAudience}`,
+        `Constraints: ${intake.constraints}`,
+        `Success signal: ${intake.successSignal}`,
+    ].filter((line) => !line.endsWith(': ')).join(' | ');
+}
+
 function TopRightControls() {
     const undo = useStore((state) => state.undo);
     const redo = useStore((state) => state.redo);
     const past = useStore((state) => state.past);
     const future = useStore((state) => state.future);
+    const allNodes = useStore((state) => state.nodes);
+    const reactFlow = useReactFlow();
 
     const onExportClick = () => {
-        // Basic implementation: Capture the viewport container
-        const checkElement = document.querySelector('.react-flow__viewport') as HTMLElement;
+        const viewportElement = document.querySelector('.react-flow__viewport') as HTMLElement | null;
+        if (!viewportElement || allNodes.length === 0) return;
 
-        if (checkElement) {
-            // Simple delay to ensure rendering
-            setTimeout(() => {
-                toPng(checkElement, {
-                    backgroundColor: '#09090b',
-                    width: 1920, // Enforce high res
-                    height: 1080,
-                    style: {
-                        transform: 'scale(1)', // normalize
-                    },
-                    cacheBust: true,
-                }).then((dataUrl) => {
-                    const a = document.createElement('a');
-                    a.setAttribute('download', 'idea-ai-mindmap.png');
-                    a.setAttribute('href', dataUrl);
-                    a.click();
-                }).catch(err => {
-                    console.error("Failed to export image", err);
-                });
-            }, 100);
-        }
+        const imageWidth = 2400;
+        const imageHeight = 1400;
+        const bounds = getNodesBounds(allNodes);
+        const viewport = getViewportForBounds(bounds, imageWidth, imageHeight, 0.2, 2, 0.5);
+
+        toPng(viewportElement, {
+            backgroundColor: '#09090b',
+            width: imageWidth,
+            height: imageHeight,
+            style: {
+                width: `${imageWidth}px`,
+                height: `${imageHeight}px`,
+                transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`,
+            },
+            cacheBust: true,
+        }).then((dataUrl) => {
+            const a = document.createElement('a');
+            a.setAttribute('download', 'idea-ai-mindmap.png');
+            a.setAttribute('href', dataUrl);
+            a.click();
+            reactFlow.fitView({ padding: 0.2, duration: 250 });
+        }).catch(err => {
+            console.error("Failed to export image", err);
+        });
     };
 
     return (
@@ -108,7 +137,22 @@ export default function MindMapBoard() {
     const removeEdge = useStore((state) => state.removeEdge);
     const undo = useStore((state) => state.undo);
     const redo = useStore((state) => state.redo);
+    const goal = useStore((state) => state.goal);
+    const sectionBriefs = useStore((state) => state.sectionBriefs);
+    const sectionBriefDraftFor = useStore((state) => state.sectionBriefDraftFor);
+    const setSectionBrief = useStore((state) => state.setSectionBrief);
+    const openSectionBriefDraft = useStore((state) => state.openSectionBriefDraft);
+    const closeSectionBriefDraft = useStore((state) => state.closeSectionBriefDraft);
+    const sectionBriefDismissed = useStore((state) => state.sectionBriefDismissed);
+    const setSectionBriefDismissed = useStore((state) => state.setSectionBriefDismissed);
+    const getScopedMindMapAsJSON = useStore((state) => state.getScopedMindMapAsJSON);
+    const setMindMapFromJSON = useStore((state) => state.setMindMapFromJSON);
+    const getMessagesForAI = useStore((state) => state.getMessagesForAI);
+    const userConstraints = useStore((state) => state.userConstraints);
+    const projectIntake = useStore((state) => state.projectIntake);
+    const addMessage = useStore((state) => state.addMessage);
     const [isFullView, setIsFullView] = useState(false);
+    const [isBriefSubmitting, setIsBriefSubmitting] = useState(false);
 
     // Filter nodes based on activeSection
     const { visibleNodes, visibleEdges } = useMemo(() => {
@@ -134,6 +178,7 @@ export default function MindMapBoard() {
 
         // SECTION MODE: Show the open Section node + all descendants
         const sectionDescendantIds = new Set<string>();
+        const nodeById = new Map(nodes.map((node) => [node.id, node]));
         const adjacency = new Map<string, string[]>();
         edges.forEach((edge) => {
             const children = adjacency.get(edge.source) || [];
@@ -148,7 +193,10 @@ export default function MindMapBoard() {
             sectionDescendantIds.add(current);
             const children = adjacency.get(current) || [];
             for (const child of children) {
-                if (!sectionDescendantIds.has(child)) {
+                const childNode = nodeById.get(child);
+                const isGoal = childNode?.data.nodeClass === 'goal';
+                const isOtherSection = (childNode?.data.nodeClass === 'section' || childNode?.type === 'section') && child !== activeSection;
+                if (!isGoal && !isOtherSection && !sectionDescendantIds.has(child)) {
                     queue.push(child);
                 }
             }
@@ -193,6 +241,23 @@ export default function MindMapBoard() {
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, [undo, redo]);
 
+    useEffect(() => {
+        if (!activeSection && sectionBriefDraftFor) {
+            closeSectionBriefDraft();
+        }
+    }, [activeSection, sectionBriefDraftFor, closeSectionBriefDraft]);
+
+    useEffect(() => {
+        if (
+            activeSection &&
+            !sectionBriefs[activeSection] &&
+            !sectionBriefDismissed[activeSection] &&
+            !sectionBriefDraftFor
+        ) {
+            openSectionBriefDraft(activeSection);
+        }
+    }, [activeSection, sectionBriefs, sectionBriefDismissed, sectionBriefDraftFor, openSectionBriefDraft]);
+
     // Auto fit-view when new nodes appear (Fix #1, #2, #19)
     useEffect(() => {
         if (visibleNodes.length > 0) {
@@ -219,10 +284,182 @@ export default function MindMapBoard() {
         }
     };
 
+    const runSectionUpdateFromBrief = useCallback(async (
+        targetSectionId: string,
+        sectionLabel: string,
+        briefText: string,
+        source: 'brief' | 'background'
+    ) => {
+        const currentNodes = useStore.getState().nodes;
+        const allBriefs = useStore.getState().sectionBriefs;
+        const crossSectionBriefs = Object.values(allBriefs)
+            .filter((brief) => brief.sectionId !== targetSectionId)
+            .sort((a, b) => b.updatedAt - a.updatedAt)
+            .slice(0, 4)
+            .map((brief) => `${brief.sectionLabel}: focus=${brief.focus}${brief.mustInclude ? `, must=${brief.mustInclude}` : ''}`)
+            .join(' | ');
+        const aiNodes: MindMapNode[] = currentNodes.map((node) => ({
+            id: node.id,
+            label: String(node.data.label || ''),
+            description: String(node.data.description || ''),
+            nodeClass: ((node.data.nodeClass as MindMapNode['nodeClass']) || 'idea'),
+            nodeType: (typeof node.type === 'string' ? node.type : 'expandable') as MindMapNode['nodeType'],
+            items: Array.isArray(node.data.items) ? node.data.items as { id: string; text: string; completed: boolean }[] : undefined,
+        }));
+        const sectionNode = currentNodes.find((node) => node.id === targetSectionId);
+        const intakeText = buildProjectIntakeText(projectIntake);
+        const sectionPrompt = [
+            `[Section: ${sectionLabel}]`,
+            `Use this section brief to update only this section with high-impact nodes.`,
+            `Section Brief: ${briefText}`,
+            crossSectionBriefs ? `Other sections context: ${crossSectionBriefs}` : '',
+            intakeText ? `Project Intake: ${intakeText}` : '',
+            userConstraints.length > 0 ? `Global Constraints: ${userConstraints.join(' | ')}` : '',
+            source === 'background'
+                ? 'Create 1-2 concise improvements only; avoid large expansions.'
+                : 'Create 4-7 concrete, relevant nodes; avoid redundancy.'
+        ].filter(Boolean).join('\n');
+
+        const history = (getMessagesForAI() as ChatMessage[]).slice(-5);
+        const chatHistory: ChatMessage[] = [...history, { role: 'user', content: sectionPrompt }];
+        const response = await aiService.chat(
+            goal,
+            chatHistory,
+            getScopedMindMapAsJSON(),
+            undefined,
+            undefined,
+            {
+                forceContextual: true,
+                maxTokens: source === 'background' ? 900 : 1400,
+                temperature: source === 'background' ? 0.55 : 0.62,
+            }
+        );
+
+        const parsed = parseAIResponse(
+            response,
+            goal,
+            aiNodes,
+            `brief_${Date.now()}`,
+            targetSectionId,
+            sectionPrompt
+        );
+
+        if (parsed.redirectTo) return;
+        const quality = applyQualityGate(parsed.updatedMindMap, {
+            goal,
+            userPrompt: sectionPrompt,
+            sectionLabel,
+            sectionBriefText: `${briefText}${briefText && intakeText ? ' | ' : ''}${intakeText}`,
+            userConstraints,
+            existingNodes: aiNodes,
+        });
+
+        if (quality.updatedMindMap.nodes.length > 0) {
+            setMindMapFromJSON(quality.updatedMindMap);
+            addMessage(
+                'assistant',
+                source === 'background'
+                    ? `Updated ${sectionLabel} using related section context.`
+                    : `Updated ${sectionLabel} using your section brief.`
+            );
+        } else if (source !== 'background') {
+            addMessage('assistant', `I need a bit more detail to improve ${sectionLabel}.`);
+        }
+
+        if (source === 'brief' && sectionNode) {
+            useStore.getState().setActiveSection(sectionNode.id);
+        }
+    }, [
+        goal,
+        userConstraints,
+        projectIntake,
+        getMessagesForAI,
+        getScopedMindMapAsJSON,
+        setMindMapFromJSON,
+        addMessage
+    ]);
+
+    const handleBriefSubmit = useCallback(async (payload: {
+        sectionLabel: string;
+        focus: string;
+        mustInclude: string;
+    }) => {
+        if (!sectionBriefDraftFor) return;
+        setIsBriefSubmitting(true);
+        try {
+            setSectionBrief(sectionBriefDraftFor, payload);
+            const briefText = buildSectionBriefText({
+                sectionId: sectionBriefDraftFor,
+                sectionLabel: payload.sectionLabel,
+                focus: payload.focus,
+                mustInclude: payload.mustInclude,
+                updatedAt: Date.now(),
+            });
+
+            await runSectionUpdateFromBrief(sectionBriefDraftFor, payload.sectionLabel, briefText, 'brief');
+            closeSectionBriefDraft();
+
+            const sectionNodes = nodes.filter((node) =>
+                (node.data.nodeClass === 'section' || node.type === 'section') &&
+                node.id !== sectionBriefDraftFor
+            );
+            const scoreText = `${payload.focus} ${payload.mustInclude}`.toLowerCase();
+            const relatedSections = sectionNodes
+                .map((node) => ({
+                    id: node.id,
+                    label: String(node.data.label || ''),
+                    score: String(node.data.label || '').toLowerCase().split(/\s+/).reduce((acc, token) => {
+                        return acc + (token.length > 2 && scoreText.includes(token) ? 1 : 0);
+                    }, 0)
+                }))
+                .sort((a, b) => b.score - a.score)
+                .slice(0, 2)
+                .filter((entry) => entry.score > 0);
+
+            relatedSections.forEach((entry, index) => {
+                window.setTimeout(() => {
+                    runSectionUpdateFromBrief(entry.id, entry.label, briefText, 'background').catch((error) => {
+                        console.error('[SectionBrief] background update failed', error);
+                    });
+                }, 900 * (index + 1));
+            });
+        } finally {
+            setIsBriefSubmitting(false);
+        }
+    }, [
+        sectionBriefDraftFor,
+        setSectionBrief,
+        closeSectionBriefDraft,
+        runSectionUpdateFromBrief,
+        nodes
+    ]);
+
+    const sectionDraftNode = sectionBriefDraftFor
+        ? nodes.find((node) => node.id === sectionBriefDraftFor)
+        : null;
+
     return (
         <div className="w-full h-full bg-transparent relative selection:bg-primary/30">
             {/* Phase B: Breadcrumb overlay */}
             <SectionBreadcrumb isFullView={isFullView} setIsFullView={setIsFullView} />
+
+            {sectionBriefDraftFor && sectionDraftNode && (
+                <SectionBriefPanel
+                    key={sectionBriefDraftFor}
+                    sectionLabel={String(sectionDraftNode.data.label || 'Section')}
+                    initialBrief={sectionBriefs[sectionBriefDraftFor]}
+                    isSubmitting={isBriefSubmitting}
+                    onClose={() => {
+                        setSectionBriefDismissed(sectionBriefDraftFor, true);
+                        closeSectionBriefDraft();
+                    }}
+                    onSkip={() => {
+                        setSectionBriefDismissed(sectionBriefDraftFor, true);
+                        closeSectionBriefDraft();
+                    }}
+                    onSubmit={handleBriefSubmit}
+                />
+            )}
 
             <div className="absolute inset-0 z-10 pt-16">
                 <ReactFlow

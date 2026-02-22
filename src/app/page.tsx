@@ -1,15 +1,27 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { v4 as uuidv4 } from 'uuid';
 import { useStore } from '@/lib/store';
-import ThinkingModeSelector from '@/components/ThinkingModeSelector';
+import LoginButton from '@/components/Auth/LoginButton';
+import { useAuth } from '@/contexts/AuthContext';
+import { db, isFirebaseConfigured } from '@/lib/firebase';
+import { collection, deleteDoc, doc, onSnapshot, orderBy, query } from 'firebase/firestore';
+
+interface SessionSummary {
+  id: string;
+  goal: string;
+  updatedAt: number;
+  nodesCount: number;
+}
 
 export default function LandingPage() {
   const [inputGoal, setInputGoal] = useState('');
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const router = useRouter();
   const setGoal = useStore((state) => state.setGoal);
+  const { user, loading: authLoading } = useAuth();
   const createSession = () => {
     if (!inputGoal.trim()) return;
 
@@ -31,6 +43,40 @@ export default function LandingPage() {
     createSession();
   };
 
+  useEffect(() => {
+    if (!user || !isFirebaseConfigured) return;
+    const sessionsRef = collection(db, 'users', user.uid, 'sessions');
+    const q = query(sessionsRef, orderBy('updatedAt', 'desc'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const next = snapshot.docs.map((sessionDoc) => {
+        const data = sessionDoc.data();
+        return {
+          id: sessionDoc.id,
+          goal: data.goal || 'Untitled session',
+          updatedAt: data.updatedAt || 0,
+          nodesCount: Array.isArray(data.nodes) ? data.nodes.length : 0,
+        } satisfies SessionSummary;
+      });
+      setSessions(next);
+    }, (error) => {
+      console.error('[Landing] failed to load history', error);
+    });
+    return () => unsubscribe();
+  }, [user]);
+
+  const handleOpenSession = (sessionId: string) => {
+    router.push(`/mindmap/${sessionId}`);
+  };
+
+  const handleDeleteSession = async (sessionId: string) => {
+    if (!user) return;
+    try {
+      await deleteDoc(doc(db, 'users', user.uid, 'sessions', sessionId));
+    } catch (error) {
+      console.error('[Landing] failed to delete session', error);
+    }
+  };
+
   return (
     <div className="relative min-h-screen bg-transparent text-foreground font-display selection:bg-primary/30 overflow-x-hidden">
       <div className="relative z-10 flex flex-col min-h-screen">
@@ -50,9 +96,7 @@ export default function LandingPage() {
                 <span className="material-symbols-outlined text-[16px]">play_arrow</span>
                 Watch Demo
               </button>
-              <button className="neumorphic-btn w-9 h-9 rounded-full flex items-center justify-center text-text-muted hover:text-primary">
-                <span className="material-symbols-outlined text-[18px]">settings</span>
-              </button>
+              <LoginButton />
             </div>
           </nav>
         </header>
@@ -80,10 +124,6 @@ export default function LandingPage() {
                 </button>
               </div>
 
-              <div className="w-full max-w-xl mx-auto bg-background/50 p-4 rounded-2xl border border-white/5 shadow-neumorphic-dark">
-                <p className="text-xs text-text-muted uppercase tracking-wider font-bold mb-3 text-left pl-2">Select Initial Thinking Framework</p>
-                <ThinkingModeSelector />
-              </div>
             </form>
 
             <p className="text-lg md:text-xl text-text-muted max-w-2xl leading-relaxed mt-4">
@@ -195,6 +235,68 @@ export default function LandingPage() {
               Watch Demo
             </button>
           </div>
+
+          {user && isFirebaseConfigured && (
+            <section className="w-full max-w-5xl">
+              <div className="rounded-2xl border border-white/10 bg-background/60 p-5">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-xl font-bold text-surface-light">Your Mindmap History</h2>
+                    <p className="text-xs text-text-muted">
+                      {sessions.length} saved {sessions.length === 1 ? 'session' : 'sessions'}
+                    </p>
+                  </div>
+                  <div className="text-xs text-text-muted">
+                    Signed in as {user.displayName || user.email}
+                  </div>
+                </div>
+                {sessions.length === 0 ? (
+                  <p className="text-sm text-text-muted">
+                    No saved sessions yet. Start a project above to create your first map.
+                  </p>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {sessions.slice(0, 8).map((session) => (
+                      <div key={session.id} className="rounded-xl border border-white/10 bg-black/20 p-3">
+                        <p className="text-sm font-semibold text-surface-light line-clamp-2">{session.goal}</p>
+                        <p className="mt-1 text-xs text-text-muted">
+                          {session.nodesCount} nodes • {new Date(session.updatedAt).toLocaleString()}
+                        </p>
+                        <div className="mt-3 flex items-center gap-2">
+                          <button
+                            onClick={() => handleOpenSession(session.id)}
+                            className="rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-500"
+                          >
+                            Open
+                          </button>
+                          <button
+                            onClick={() => handleDeleteSession(session.id)}
+                            className="rounded-lg border border-red-400/30 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-200 hover:bg-red-500/20"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
+
+          {(!user || !isFirebaseConfigured) && !authLoading && (
+            <section className="w-full max-w-3xl text-center rounded-2xl border border-white/10 bg-background/40 p-6">
+              <h2 className="text-xl font-bold text-surface-light">Sign in to sync and access history</h2>
+              <p className="mt-2 text-sm text-text-muted">
+                {isFirebaseConfigured
+                  ? 'Your sessions are persisted in Firestore when signed in.'
+                  : 'Firebase is not configured. Add NEXT_PUBLIC_FIREBASE_* env vars to enable sign-in and cloud sync.'}
+              </p>
+              <div className="mt-4 flex justify-center">
+                <LoginButton />
+              </div>
+            </section>
+          )}
 
           <section className="w-full py-16">
             <div className="flex flex-col gap-4 mb-10 text-center">

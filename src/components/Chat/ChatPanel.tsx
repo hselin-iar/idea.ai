@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Send, Bot, User as UserIcon, Loader2 } from 'lucide-react';
+import { Send, Bot, User as UserIcon, Loader2, Check, X } from 'lucide-react';
 import { clsx } from 'clsx';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useStore } from '@/lib/store';
@@ -9,8 +9,9 @@ import { aiService, parseAIResponse, ChatMessage, ParsedAIResponse, MindMapNode 
 import { InitProgressReport } from '@mlc-ai/web-llm';
 import ModelSelector from '@/components/ModelSelector';
 import LoginButton from '@/components/Auth/LoginButton';
-import ThinkingModeSelector from '@/components/ThinkingModeSelector';
 import { v4 as uuidv4 } from 'uuid';
+import { applyQualityGate } from '@/lib/aiQuality';
+import type { ProjectIntake, SectionBrief } from '@/lib/store';
 
 function CollapsibleMessage({ content }: { content: string }) {
     const [expanded, setExpanded] = useState(false);
@@ -113,6 +114,26 @@ function normalizeInitialScaffold(
     edges.forEach((edge) => pushEdge(edge.source, edge.target));
     sections.forEach((section) => pushEdge(rootNode.id, section.id));
 
+    // Add lightweight section placeholders when a section has no children yet.
+    const hasChild = new Set(edges.map((edge) => edge.source));
+    sections.forEach((section, index) => {
+        if (hasChild.has(section.id)) return;
+        const placeholderId = `ph_${Date.now()}_${index}`;
+        nodes.push({
+            id: placeholderId,
+            label: 'Section Intake',
+            description: `Capture key context for ${section.label} to generate high-quality planning nodes.`,
+            nodeClass: 'task',
+            nodeType: 'checklist',
+            items: [
+                { id: `${placeholderId}_1`, text: 'Define core problem', completed: false },
+                { id: `${placeholderId}_2`, text: 'State desired outcomes', completed: false },
+                { id: `${placeholderId}_3`, text: 'List constraints', completed: false },
+            ]
+        });
+        pushEdge(section.id, placeholderId);
+    });
+
     const incomingByTarget = new Map<string, string>();
     for (const edge of dedupedEdges) {
         if (!incomingByTarget.has(edge.target)) {
@@ -198,26 +219,358 @@ function normalizeInitialScaffold(
     return { nodes, edges: filteredEdges };
 }
 
+function buildSectionBriefText(brief?: SectionBrief): string {
+    if (!brief) return '';
+    return [
+        `Focus: ${brief.focus}`,
+        `Must include: ${brief.mustInclude}`,
+    ].filter((line) => !line.endsWith(': ')).join(' | ');
+}
+
+function buildProjectIntakeText(projectIntake?: ProjectIntake | null): string {
+    if (!projectIntake) return '';
+    return [
+        `Objective: ${projectIntake.objective}`,
+        `Target audience: ${projectIntake.targetAudience}`,
+        `Constraints: ${projectIntake.constraints}`,
+        `Success signal: ${projectIntake.successSignal}`,
+    ].filter((line) => !line.endsWith(': ')).join(' | ');
+}
+
+function buildSectionBriefDigest(
+    briefs: Record<string, SectionBrief>,
+    activeSectionId?: string | null
+): string {
+    const entries = Object.values(briefs || {})
+        .filter((brief) => brief.sectionId !== activeSectionId)
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, 4)
+        .map((brief) => `${brief.sectionLabel}: focus=${brief.focus}${brief.mustInclude ? `, must=${brief.mustInclude}` : ''}`);
+    return entries.join(' | ');
+}
+
+function buildIntentPrompt(input: string): string {
+    const trimmed = input.trim();
+    const lower = trimmed.toLowerCase();
+    if (lower.startsWith('/prioritize')) {
+        return `${trimmed.replace('/prioritize', '').trim() || 'current section'}\n\nIntent: Prioritize highest-leverage nodes, dependencies, and execution order.`;
+    }
+    if (lower.startsWith('/gaps')) {
+        return `${trimmed.replace('/gaps', '').trim() || 'current section'}\n\nIntent: Identify missing critical nodes and weak assumptions before adding new work.`;
+    }
+    if (lower.startsWith('/challenge')) {
+        return `${trimmed.replace('/challenge', '').trim() || 'current plan'}\n\nIntent: Challenge assumptions and surface risks, blind spots, and failure modes.`;
+    }
+    if (lower.startsWith('/expand')) {
+        return `${trimmed.replace('/expand', '').trim() || 'current section'}\n\nIntent: Expand this with concrete actionable nodes and useful checklists.`;
+    }
+    return trimmed;
+}
+
 export default function ChatPanel() {
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
+    const [isIntakeSubmitting, setIsIntakeSubmitting] = useState(false);
+    const [showIntakeForm, setShowIntakeForm] = useState(false);
     const [loadingText, setLoadingText] = useState('');
     const [progress, setProgress] = useState(0);
     const [historyExpanded, setHistoryExpanded] = useState(false);
+    const [intakeObjective, setIntakeObjective] = useState('');
+    const [intakeAudience, setIntakeAudience] = useState('');
+    const [intakeConstraints, setIntakeConstraints] = useState('');
+    const [intakeSuccessSignal, setIntakeSuccessSignal] = useState('');
+    const [intakeError, setIntakeError] = useState('');
+    const [intakeJob, setIntakeJob] = useState<{
+        status: 'idle' | 'running' | 'done' | 'error';
+        total: number;
+        processed: number;
+        currentSection: string;
+        updatedSections: number;
+        addedNodes: number;
+        results: { section: string; added: number }[];
+    }>({
+        status: 'idle',
+        total: 0,
+        processed: 0,
+        currentSection: '',
+        updatedSections: 0,
+        addedNodes: 0,
+        results: [],
+    });
 
     // V23: Get all required store methods
     const messages = useStore((state) => state.messages);
     const addMessage = useStore((state) => state.addMessage);
     const goal = useStore((state) => state.goal);
+    const nodes = useStore((state) => state.nodes);
     const getScopedMindMapAsJSON = useStore((state) => state.getScopedMindMapAsJSON);
     const setMindMapFromJSON = useStore((state) => state.setMindMapFromJSON);
     const getMessagesForAI = useStore((state) => state.getMessagesForAI);
-    const thinkingMode = useStore((state) => state.thinkingMode);
+    const sectionBriefs = useStore((state) => state.sectionBriefs);
+    const projectIntake = useStore((state) => state.projectIntake);
+    const setProjectIntake = useStore((state) => state.setProjectIntake);
+    const projectIntakePrompted = useStore((state) => state.projectIntakePrompted);
+    const setProjectIntakePrompted = useStore((state) => state.setProjectIntakePrompted);
+    const userConstraints = useStore((state) => state.userConstraints);
+    const addUserConstraint = useStore((state) => state.addUserConstraint);
+    const removeUserConstraint = useStore((state) => state.removeUserConstraint);
+    const proposalMode = useStore((state) => state.proposalMode);
+    const setProposalMode = useStore((state) => state.setProposalMode);
+    const createProposal = useStore((state) => state.createProposal);
+    const proposals = useStore((state) => state.proposals);
+    const approveProposal = useStore((state) => state.approveProposal);
+    const rejectProposal = useStore((state) => state.rejectProposal);
 
     // Proactive Greeting Ref to ensure it only runs once
     const hasInitializedRef = useRef(false);
     const scrollRef = useRef<HTMLDivElement>(null);
     const lastUserMessageRef = useRef<string>('');
+
+    const runLocalCommand = useCallback((rawText: string): { handled: boolean; aiText?: string } => {
+        const trimmed = rawText.trim();
+        if (!trimmed.startsWith('/')) return { handled: false };
+
+        const parts = trimmed.split(/\s+/);
+        const command = (parts[0] || '').toLowerCase();
+        const args = parts.slice(1).join(' ').trim();
+
+        if (command === '/constraints') {
+            const text = userConstraints.length > 0
+                ? `Current constraints:\n- ${userConstraints.join('\n- ')}`
+                : 'No constraints saved yet. Use `/constraint add <text>`.';
+            addMessage('assistant', text);
+            return { handled: true };
+        }
+
+        if (command === '/constraint') {
+            const sub = (parts[1] || '').toLowerCase();
+            const value = parts.slice(2).join(' ').trim();
+            if (sub === 'add' && value) {
+                addUserConstraint(value);
+                addMessage('assistant', `Constraint added: "${value}"`);
+                return { handled: true };
+            }
+            if (sub === 'remove' && value) {
+                removeUserConstraint(value);
+                addMessage('assistant', `Constraint removed: "${value}"`);
+                return { handled: true };
+            }
+            addMessage('assistant', 'Use `/constraint add <text>` or `/constraint remove <text>`.');
+            return { handled: true };
+        }
+
+        if (command === '/approve' && args) {
+            approveProposal(args);
+            addMessage('assistant', `Approved proposal ${args}.`);
+            return { handled: true };
+        }
+        if (command === '/reject' && args) {
+            rejectProposal(args);
+            addMessage('assistant', `Rejected proposal ${args}.`);
+            return { handled: true };
+        }
+
+        if (['/prioritize', '/gaps', '/challenge', '/expand'].includes(command)) {
+            return { handled: false, aiText: buildIntentPrompt(trimmed) };
+        }
+
+        if (command === '/intake') {
+            setShowIntakeForm(true);
+            setIntakeJob({
+                status: 'idle',
+                total: 0,
+                processed: 0,
+                currentSection: '',
+                updatedSections: 0,
+                addedNodes: 0,
+                results: [],
+            });
+            addMessage('assistant', 'Project intake is open. Submit it to refresh all sections with better context.');
+            return { handled: true };
+        }
+
+        addMessage('assistant', 'Commands: `/constraints`, `/constraint add ...`, `/constraint remove ...`, `/intake`, `/prioritize`, `/gaps`, `/challenge`, `/expand`.');
+        return { handled: true };
+    }, [
+        userConstraints,
+        addMessage,
+        addUserConstraint,
+        removeUserConstraint,
+        approveProposal,
+        rejectProposal,
+        setShowIntakeForm
+    ]);
+
+    const handleProjectIntakeSubmit = useCallback(async () => {
+        const objective = intakeObjective.trim();
+        const targetAudience = intakeAudience.trim();
+        const constraints = intakeConstraints.trim();
+        const successSignal = intakeSuccessSignal.trim();
+
+        if (objective.length < 12 || targetAudience.length < 4) {
+            setIntakeError('Add a clear objective and target audience.');
+            return;
+        }
+
+        setIntakeError('');
+        setIsIntakeSubmitting(true);
+        setIntakeJob({
+            status: 'idle',
+            total: 0,
+            processed: 0,
+            currentSection: '',
+            updatedSections: 0,
+            addedNodes: 0,
+            results: [],
+        });
+
+        try {
+            setProjectIntake({
+                objective,
+                targetAudience,
+                constraints,
+                successSignal,
+            });
+            if (constraints.length > 0) {
+                addUserConstraint(constraints);
+            }
+
+            const sectionNodes = useStore.getState().nodes.filter(
+                (node) => node.data.nodeClass === 'section' || node.type === 'section'
+            );
+
+            setIntakeJob({
+                status: 'running',
+                total: sectionNodes.length,
+                processed: 0,
+                currentSection: sectionNodes[0] ? String(sectionNodes[0].data.label || 'Section') : '',
+                updatedSections: 0,
+                addedNodes: 0,
+                results: [],
+            });
+
+            if (sectionNodes.length === 0) {
+                setIntakeJob((prev) => ({ ...prev, status: 'done' }));
+                addMessage('assistant', 'Saved project intake. I will apply it as soon as sections are available.');
+                return;
+            }
+
+            let updatedSections = 0;
+            let addedNodes = 0;
+            const intakeText = buildProjectIntakeText({
+                objective,
+                targetAudience,
+                constraints,
+                successSignal,
+                updatedAt: Date.now(),
+            });
+
+            for (const sectionNode of sectionNodes) {
+                const sectionId = sectionNode.id;
+                const sectionLabel = String(sectionNode.data.label || 'Section');
+                setIntakeJob((prev) => ({ ...prev, currentSection: sectionLabel }));
+                const sectionBrief = useStore.getState().sectionBriefs[sectionId];
+                const sectionBriefText = buildSectionBriefText(sectionBrief);
+                const sectionPrompt = [
+                    `[Section: ${sectionLabel}]`,
+                    `Update this section with high-impact nodes using the global project intake.`,
+                    `Project Intake: ${intakeText}`,
+                    sectionBriefText ? `Section Brief: ${sectionBriefText}` : '',
+                    userConstraints.length > 0 ? `Global Constraints: ${userConstraints.join(' | ')}` : '',
+                    'Add only 2-3 concrete nodes. Prioritize non-redundant checklist-style execution details.',
+                ].filter(Boolean).join('\n');
+
+                const currentNodes = useStore.getState().nodes;
+                const aiNodes: MindMapNode[] = currentNodes.map((node) => ({
+                    id: node.id,
+                    label: String(node.data.label || ''),
+                    description: String(node.data.description || ''),
+                    nodeClass: ((node.data.nodeClass as MindMapNode['nodeClass']) || 'idea'),
+                    nodeType: (typeof node.type === 'string' ? node.type : 'expandable') as MindMapNode['nodeType'],
+                    items: Array.isArray(node.data.items)
+                        ? node.data.items as { id: string; text: string; completed: boolean }[]
+                        : undefined,
+                }));
+
+                const history = (getMessagesForAI() as ChatMessage[]).slice(-4);
+                const response = await aiService.chat(
+                    goal,
+                    [...history, { role: 'user', content: sectionPrompt }],
+                    getScopedMindMapAsJSON(),
+                    undefined,
+                    undefined,
+                    { forceContextual: true, maxTokens: 900, temperature: 0.58 }
+                );
+
+                const parsed = parseAIResponse(
+                    response,
+                    goal,
+                    aiNodes,
+                    `intake_${Date.now()}`,
+                    sectionId,
+                    sectionPrompt
+                );
+
+                if (parsed.redirectTo) continue;
+
+                const quality = applyQualityGate(parsed.updatedMindMap, {
+                    goal,
+                    userPrompt: sectionPrompt,
+                    sectionLabel,
+                    sectionBriefText: `${sectionBriefText}${sectionBriefText ? ' | ' : ''}${intakeText}`,
+                    userConstraints,
+                    existingNodes: aiNodes,
+                });
+
+                if (quality.updatedMindMap.nodes.length > 0) {
+                    setMindMapFromJSON(quality.updatedMindMap);
+                    updatedSections += 1;
+                    addedNodes += quality.updatedMindMap.nodes.length;
+                }
+
+                setIntakeJob((prev) => ({
+                    ...prev,
+                    processed: prev.processed + 1,
+                    updatedSections,
+                    addedNodes,
+                    results: [
+                        ...prev.results,
+                        {
+                            section: sectionLabel,
+                            added: quality.updatedMindMap.nodes.length,
+                        }
+                    ],
+                }));
+            }
+
+            setIntakeJob((prev) => ({ ...prev, status: 'done', currentSection: '' }));
+            addMessage(
+                'assistant',
+                updatedSections > 0
+                    ? `Intake applied across ${updatedSections}/${sectionNodes.length} sections. Added ${addedNodes} focused nodes. Open sections to inspect updates.`
+                    : 'Intake saved. I could not find high-quality additions yet, so I kept the map stable.'
+            );
+        } catch (error) {
+            console.error('[ChatPanel] project intake update failed', error);
+            setIntakeJob((prev) => ({ ...prev, status: 'error', currentSection: '' }));
+            addMessage('assistant', 'Project intake saved, but section refresh failed this time. Try again in a moment.');
+        } finally {
+            setIsIntakeSubmitting(false);
+        }
+    }, [
+        intakeObjective,
+        intakeAudience,
+        intakeConstraints,
+        intakeSuccessSignal,
+        setProjectIntake,
+        addUserConstraint,
+        addMessage,
+        getMessagesForAI,
+        goal,
+        getScopedMindMapAsJSON,
+        userConstraints,
+        setMindMapFromJSON
+    ]);
 
     // Auto-scroll to bottom
     useEffect(() => {
@@ -230,6 +583,27 @@ export default function ChatPanel() {
             }, 50);
         }
     }, [messages, isLoading, historyExpanded]);
+
+    useEffect(() => {
+        if (!projectIntake) return;
+        setIntakeObjective(projectIntake.objective || '');
+        setIntakeAudience(projectIntake.targetAudience || '');
+        setIntakeConstraints(projectIntake.constraints || '');
+        setIntakeSuccessSignal(projectIntake.successSignal || '');
+    }, [projectIntake]);
+
+    useEffect(() => {
+        const sectionCount = nodes.filter((node) => node.data.nodeClass === 'section' || node.type === 'section').length;
+        const hasBaseScaffold = !!goal && sectionCount >= 4;
+        if (!hasBaseScaffold || projectIntakePrompted) return;
+
+        setProjectIntakePrompted(true);
+        setShowIntakeForm(true);
+        addMessage(
+            'assistant',
+            'Base sections are ready. Fill the project intake card so I can improve every section using shared context.'
+        );
+    }, [nodes, goal, projectIntakePrompted, setProjectIntakePrompted, addMessage]);
 
     // V44: Process AI response using parser with robust fallback
     const processAIResponse = useCallback((response: string, isFirstTurn: boolean = false) => {
@@ -281,6 +655,24 @@ export default function ChatPanel() {
             parsedData.updatedMindMap = normalizeInitialScaffold(goal, parsedData.updatedMindMap);
         }
 
+        let rejectedNodes = 0;
+        let qualitySummary = '';
+        if (parsedData.updatedMindMap?.nodes?.length > 0 && !parsedData.redirectTo) {
+            const sectionBrief = activeSectionId ? sectionBriefs[activeSectionId] : undefined;
+            const intakeText = buildProjectIntakeText(projectIntake);
+            const quality = applyQualityGate(parsedData.updatedMindMap, {
+                goal,
+                userPrompt: lastUserMsg,
+                sectionLabel: currentSectionNode ? String(currentSectionNode.data.label || '') : undefined,
+                sectionBriefText: `${buildSectionBriefText(sectionBrief)}${buildSectionBriefText(sectionBrief) && intakeText ? ' | ' : ''}${intakeText}`,
+                userConstraints,
+                existingNodes: aiNodes,
+            });
+            parsedData.updatedMindMap = quality.updatedMindMap;
+            rejectedNodes = quality.rejectedCount;
+            qualitySummary = quality.summary;
+        }
+
         let cleanResponse = parsedData.assistantResponse || "What would you like to explore?";
         let suggestions = parsedData.suggestions || [];
 
@@ -314,11 +706,24 @@ export default function ChatPanel() {
         const shouldOfferRedirect = !!parsedData.redirectTo &&
             (!activeSectionLabel || parsedData.redirectTo.toLowerCase() !== activeSectionLabel.toLowerCase());
 
-        // V44: Always update mind map when response is in the active context
-        if (!shouldOfferRedirect && parsedData.updatedMindMap && parsedData.updatedMindMap.nodes?.length > 0) {
-            console.log("V44 DEBUG: Updating mind map:", parsedData.updatedMindMap);
-            setMindMapFromJSON(parsedData.updatedMindMap);
-        } else if (!shouldOfferRedirect && !isFirstTurn && lastUserMsg) {
+        let proposalId: string | undefined;
+        if (
+            !shouldOfferRedirect &&
+            parsedData.updatedMindMap &&
+            parsedData.updatedMindMap.nodes?.length > 0
+        ) {
+            if (!isFirstTurn && proposalMode) {
+                proposalId = createProposal({
+                    mapData: parsedData.updatedMindMap,
+                    summary: qualitySummary || `Proposed ${parsedData.updatedMindMap.nodes.length} updates`,
+                    sectionId: activeSectionId || undefined,
+                    source: 'chat',
+                });
+            } else {
+                console.log("V44 DEBUG: Updating mind map:", parsedData.updatedMindMap);
+                setMindMapFromJSON(parsedData.updatedMindMap);
+            }
+        } else if (!shouldOfferRedirect && !isFirstTurn && lastUserMsg && !proposalMode) {
             // V44: Fallback - create node from user message anyway
             console.log("V44 DEBUG: Fallback - creating node from user message");
             const fallbackData = {
@@ -333,6 +738,9 @@ export default function ChatPanel() {
             // Count new nodes that aren't the root
             nodesAdded = parsedData.updatedMindMap.nodes.filter((n) => n.id !== 'root').length;
         }
+        if (proposalId) {
+            nodesAdded = 0;
+        }
 
         let sectionName = goal || 'Project Overview'; // Fix #15: Default to Goal instead of generic 'Plan'
         if (currentSectionNode) {
@@ -343,14 +751,30 @@ export default function ChatPanel() {
             nodesAdded: nodesAdded > 0 ? nodesAdded : undefined,
             sectionName,
             redirectTo: shouldOfferRedirect ? parsedData.redirectTo : undefined,
-            redirectReason: shouldOfferRedirect ? parsedData.redirectReason : undefined
+            redirectReason: shouldOfferRedirect ? parsedData.redirectReason : undefined,
+            proposalId,
+            proposalSummary: proposalId ? (qualitySummary || 'Review suggested updates') : undefined,
+            rejectedNodes: rejectedNodes > 0 ? rejectedNodes : undefined,
         };
+
+        if (proposalId) {
+            cleanResponse = `${cleanResponse} I prepared a proposal for your approval before applying changes.`;
+        }
 
         addMessage('assistant', cleanResponse, suggestions, metadata);
         setIsLoading(false);
         setLoadingText('');
         setProgress(0);
-    }, [goal, addMessage, setMindMapFromJSON]);
+    }, [
+        goal,
+        addMessage,
+        setMindMapFromJSON,
+        sectionBriefs,
+        projectIntake,
+        userConstraints,
+        proposalMode,
+        createProposal
+    ]);
 
     // Proactive Greeting Effect (V23: Full context injection)
     useEffect(() => {
@@ -368,7 +792,7 @@ export default function ChatPanel() {
                         goal,
                         chatHistory,
                         currentMapJSON,
-                        thinkingMode,
+                        undefined,
                         (report: InitProgressReport) => {
                             setLoadingText(report.text);
                             if (report.progress) setProgress(report.progress);
@@ -385,7 +809,7 @@ export default function ChatPanel() {
             }
         };
         initChat();
-    }, [goal, messages.length, addMessage, getScopedMindMapAsJSON, processAIResponse, thinkingMode]);
+    }, [goal, messages.length, addMessage, getScopedMindMapAsJSON, processAIResponse]);
 
     // V42: Send message with debug logging
     const handleSend = async (textOverride?: string) => {
@@ -394,6 +818,9 @@ export default function ChatPanel() {
         if (!textToSend.trim() || isLoading) return;
 
         setInput('');
+
+        const commandResult = runLocalCommand(textToSend);
+        const aiText = commandResult.aiText || textToSend;
 
         // Include Section Context Prefix
         const activeSectionId = useStore.getState().activeSection;
@@ -409,20 +836,46 @@ export default function ChatPanel() {
         }
 
         addMessage('user', visibleText);
+
+        if (commandResult.handled) {
+            return;
+        }
+
         setIsLoading(true);
 
         // V42: Store last user message for parser (using the un-prefixed one for node generation fallback)
-        lastUserMessageRef.current = textToSend;
+        lastUserMessageRef.current = aiText;
 
         try {
             // Get messages and cast to ChatMessage[] for AI service
             const chatHistory = getMessagesForAI() as ChatMessage[];
             console.log("V42 DEBUG: Chat history being sent:", chatHistory);
 
+            const activeSection = activeSectionId ? useStore.getState().nodes.find((n) => n.id === activeSectionId) : undefined;
+            const sectionBrief = activeSectionId ? sectionBriefs[activeSectionId] : undefined;
+            const sectionBriefText = buildSectionBriefText(sectionBrief);
+            const sectionBriefDigest = buildSectionBriefDigest(sectionBriefs, activeSectionId);
+            const projectIntakeText = buildProjectIntakeText(projectIntake);
+            const constraintText = userConstraints.length > 0 ? `Constraints: ${userConstraints.join(' | ')}` : '';
+            const enrichedText = [
+                prefix ? `[Section: ${String(activeSection?.data.label || '')}]` : '',
+                buildIntentPrompt(aiText),
+                projectIntakeText ? `Project Intake: ${projectIntakeText}` : '',
+                sectionBriefText ? `Section Brief: ${sectionBriefText}` : '',
+                sectionBriefDigest ? `Other section context: ${sectionBriefDigest}` : '',
+                constraintText,
+            ].filter(Boolean).join('\n');
+
+            if (chatHistory.length > 0 && chatHistory[chatHistory.length - 1]?.role === 'user') {
+                chatHistory[chatHistory.length - 1] = { role: 'user', content: enrichedText };
+            } else {
+                chatHistory.push({ role: 'user', content: enrichedText });
+            }
+
             const currentMapJSON = getScopedMindMapAsJSON();
             console.log("V42 DEBUG: Current map being sent:", currentMapJSON);
 
-            const response = await aiService.chat(goal, chatHistory, currentMapJSON, thinkingMode);
+            const response = await aiService.chat(goal, chatHistory, currentMapJSON);
             processAIResponse(response, false);
 
         } catch (error) {
@@ -449,16 +902,25 @@ export default function ChatPanel() {
             {/* Global background handles texture */}
 
             <div className="p-4 border-b border-white/5 bg-background/80 backdrop-blur-md z-10 flex flex-col gap-3">
-                {/* Thinking Mode Selector - Moved to Top */}
-                <div className="w-full">
-                    <ThinkingModeSelector />
-                </div>
-
                 <div className="flex items-center justify-between">
                     <p className="text-xs text-text-muted ml-2">
-                        {isLoading && progress > 0 && progress < 1 ? `Loading Brain: ${(progress * 100).toFixed(0)}%` : "Powered by WebLLM"}
+                        {isIntakeSubmitting
+                            ? `Applying intake: ${intakeJob.processed}/${intakeJob.total}`
+                            : (isLoading && progress > 0 && progress < 1 ? `Loading Brain: ${(progress * 100).toFixed(0)}%` : "Powered by WebLLM")}
                     </p>
                     <div className="flex items-center gap-2">
+                        <button
+                            onClick={() => setProposalMode(!proposalMode)}
+                            className={clsx(
+                                "text-[11px] px-2.5 py-1.5 rounded-full border transition-colors",
+                                proposalMode
+                                    ? "border-amber-400/30 bg-amber-500/10 text-amber-200"
+                                    : "border-emerald-400/30 bg-emerald-500/10 text-emerald-200"
+                            )}
+                            title={proposalMode ? "AI suggestions require approval" : "AI applies updates immediately"}
+                        >
+                            {proposalMode ? 'Review Mode' : 'Auto Apply'}
+                        </button>
                         <LoginButton />
                         <div className="relative">
                             <ModelSelector />
@@ -468,6 +930,88 @@ export default function ChatPanel() {
             </div>
 
             <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-6 scroll-smooth z-0 relative">
+                {showIntakeForm && (
+                    <div className="rounded-2xl border border-blue-400/20 bg-blue-500/10 p-4 space-y-3">
+                        <p className="text-sm font-semibold text-blue-100">Project Intake</p>
+                        <p className="text-xs text-blue-200/85">
+                            Provide core project context once. I will pass it to all sections and refresh their nodes.
+                        </p>
+                        <label className="block text-xs text-blue-100">
+                            Objective *
+                            <textarea
+                                value={intakeObjective}
+                                onChange={(e) => setIntakeObjective(e.target.value)}
+                                className="mt-1 w-full min-h-[64px] rounded-lg bg-zinc-900/70 border border-zinc-700 px-3 py-2 text-zinc-100 focus:outline-none focus:border-blue-400"
+                                placeholder="What are you trying to achieve?"
+                            />
+                        </label>
+                        <label className="block text-xs text-blue-100">
+                            Target audience *
+                            <input
+                                value={intakeAudience}
+                                onChange={(e) => setIntakeAudience(e.target.value)}
+                                className="mt-1 w-full rounded-lg bg-zinc-900/70 border border-zinc-700 px-3 py-2 text-zinc-100 focus:outline-none focus:border-blue-400"
+                                placeholder="Who is this for?"
+                            />
+                        </label>
+                        <label className="block text-xs text-blue-100">
+                            Key constraints
+                            <input
+                                value={intakeConstraints}
+                                onChange={(e) => setIntakeConstraints(e.target.value)}
+                                className="mt-1 w-full rounded-lg bg-zinc-900/70 border border-zinc-700 px-3 py-2 text-zinc-100 focus:outline-none focus:border-blue-400"
+                                placeholder="Budget, timeline, stack, compliance..."
+                            />
+                        </label>
+                        <label className="block text-xs text-blue-100">
+                            Success signal
+                            <input
+                                value={intakeSuccessSignal}
+                                onChange={(e) => setIntakeSuccessSignal(e.target.value)}
+                                className="mt-1 w-full rounded-lg bg-zinc-900/70 border border-zinc-700 px-3 py-2 text-zinc-100 focus:outline-none focus:border-blue-400"
+                                placeholder="How will you know this worked?"
+                            />
+                        </label>
+                        {intakeError && <p className="text-xs text-red-300">{intakeError}</p>}
+                        {intakeJob.status !== 'idle' && (
+                            <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+                                <p className="text-xs text-zinc-100 font-medium">
+                                    {intakeJob.status === 'running'
+                                        ? `Updating section: ${intakeJob.currentSection || 'Preparing...'}`
+                                        : intakeJob.status === 'done'
+                                            ? `Completed: ${intakeJob.updatedSections}/${intakeJob.total} sections updated`
+                                            : 'Update failed'}
+                                </p>
+                                <div className="mt-2 h-1.5 w-full overflow-hidden rounded bg-white/10">
+                                    <div
+                                        className="h-full bg-blue-400 transition-all"
+                                        style={{ width: `${intakeJob.total > 0 ? (intakeJob.processed / intakeJob.total) * 100 : 0}%` }}
+                                    />
+                                </div>
+                                <p className="mt-2 text-[11px] text-zinc-300">
+                                    Processed {intakeJob.processed}/{intakeJob.total} • Added {intakeJob.addedNodes} nodes
+                                </p>
+                            </div>
+                        )}
+                        <div className="flex items-center gap-2">
+                            <button
+                                onClick={handleProjectIntakeSubmit}
+                                disabled={isIntakeSubmitting || isLoading}
+                                className="inline-flex items-center gap-2 rounded-lg bg-blue-500 hover:bg-blue-600 px-3 py-2 text-xs font-medium text-white disabled:opacity-50"
+                            >
+                                {(isIntakeSubmitting || isLoading) && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                                Apply To Sections
+                            </button>
+                            <button
+                                onClick={() => setShowIntakeForm(false)}
+                                disabled={isIntakeSubmitting}
+                                className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-zinc-200 hover:bg-white/10 disabled:opacity-50"
+                            >
+                                {isIntakeSubmitting ? 'Working...' : 'Later'}
+                            </button>
+                        </div>
+                    </div>
+                )}
                 {isHistoryCompressed && (
                     <div className="flex justify-center pb-2">
                         <button
@@ -583,6 +1127,47 @@ export default function ChatPanel() {
                                             </button>
                                         </div>
                                     )}
+
+                                    {msg.role === 'assistant' && msg.metadata?.proposalId && (() => {
+                                        const proposal = proposals[msg.metadata?.proposalId || ''];
+                                        if (!proposal) return null;
+
+                                        return (
+                                            <div className="mt-3 flex flex-col gap-2 p-3 rounded-xl border border-amber-500/30 bg-amber-500/10">
+                                                <p className="text-xs text-amber-100">{msg.metadata?.proposalSummary || 'Review suggested updates.'}</p>
+                                                {typeof msg.metadata?.rejectedNodes === 'number' && msg.metadata.rejectedNodes > 0 && (
+                                                    <p className="text-[11px] text-amber-200/80">
+                                                        Filtered out {msg.metadata.rejectedNodes} low-quality nodes.
+                                                    </p>
+                                                )}
+                                                {proposal.status === 'pending' ? (
+                                                    <div className="flex gap-2">
+                                                        <button
+                                                            onClick={() => approveProposal(proposal.id)}
+                                                            className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-emerald-500 text-white hover:bg-emerald-600"
+                                                        >
+                                                            <Check className="w-3 h-3" />
+                                                            Approve
+                                                        </button>
+                                                        <button
+                                                            onClick={() => rejectProposal(proposal.id)}
+                                                            className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-red-500 text-white hover:bg-red-600"
+                                                        >
+                                                            <X className="w-3 h-3" />
+                                                            Reject
+                                                        </button>
+                                                    </div>
+                                                ) : (
+                                                    <p className={clsx(
+                                                        "text-[11px] font-medium",
+                                                        proposal.status === 'approved' ? "text-emerald-200" : "text-red-200"
+                                                    )}>
+                                                        Proposal {proposal.status}.
+                                                    </p>
+                                                )}
+                                            </div>
+                                        );
+                                    })()}
                                 </div>
                             </div>
 

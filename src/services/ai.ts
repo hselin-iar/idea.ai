@@ -364,6 +364,7 @@ RULES:
    - Description: A 1-2 sentence detailed explanation of the node's purpose. MUST NOT BE EMPTY.
 5. For checklist nodes, ALWAYS add an ITEMS line on the very next line: ITEMS: item1 | item2 | item3
    Pre-fill 3-6 actionable checklist items relevant to the node's purpose.
+   Checklist items must be concise verb phrases and must NOT repeat the full node label text.
 6. Define connections between nodes: SourceID --> TargetID
 7. You MUST output at least 2 new nodes per response, unless you emit SWITCH_SECTION.
 8. NEVER output placeholder text or bracket templates.
@@ -534,12 +535,11 @@ function inferNodeType(
   return explicit;
 }
 
-function buildDefaultChecklistItems(label: string): { id: string; text: string; completed: boolean }[] {
-  const seed = label.trim() || 'this workstream';
+function buildDefaultChecklistItems(): { id: string; text: string; completed: boolean }[] {
   return [
-    { id: `item-${Date.now()}-0`, text: `Define scope and success criteria for ${seed}`, completed: false },
-    { id: `item-${Date.now()}-1`, text: `Execute core activities for ${seed}`, completed: false },
-    { id: `item-${Date.now()}-2`, text: `Review results and iterate for ${seed}`, completed: false },
+    { id: `item-${Date.now()}-0`, text: `Define scope and success criteria`, completed: false },
+    { id: `item-${Date.now()}-1`, text: `Execute core activities`, completed: false },
+    { id: `item-${Date.now()}-2`, text: `Review results and iterate`, completed: false },
   ];
 }
 
@@ -682,7 +682,7 @@ export function parseAIResponse(
       );
 
       if (nodeData.nodeType === 'checklist' && (!nodeData.items || nodeData.items.length === 0)) {
-        nodeData.items = buildDefaultChecklistItems(nodeData.label);
+        nodeData.items = buildDefaultChecklistItems();
       }
 
       newNodes.push(nodeData);
@@ -827,6 +827,20 @@ export class AIService {
     return guidance[mode] || guidance.explore;
   }
 
+  private mapContextToMode(context: PlanningContext): 'explore' | 'analyze' | 'create' | 'execute' {
+    const mapping: Record<PlanningContext, 'explore' | 'analyze' | 'create' | 'execute'> = {
+      new_project: 'explore',
+      problem_solving: 'analyze',
+      decision_making: 'analyze',
+      brainstorming: 'create',
+      refinement: 'create',
+      execution: 'execute',
+      validation: 'analyze',
+      general: 'explore',
+    };
+    return mapping[context];
+  }
+
 
   /**
    * Sends a chat message to the AI and returns the response.
@@ -842,7 +856,7 @@ export class AIService {
     currentMindMapJSON: string,
     thinkingMode?: 'explore' | 'analyze' | 'create' | 'execute',
     onProgress?: InitProgressCallback,
-    options?: { forceContextual?: boolean }
+    options?: { forceContextual?: boolean; maxTokens?: number; temperature?: number }
   ): Promise<string> {
     const engine = await this.getEngine(onProgress);
 
@@ -850,11 +864,12 @@ export class AIService {
     const lastUserMsg = chatHistory[chatHistory.length - 1]?.content || "";
     const planningContext = detectPlanningContext(lastUserMsg, isFirstTurn);
 
-    // Get mode-specific guidance
-    const modeGuidance = this.getModeGuidance(thinkingMode || 'explore');
+    // Auto-select the most suitable mode from context unless explicitly provided.
+    const resolvedMode = thinkingMode || this.mapContextToMode(planningContext);
+    const modeGuidance = this.getModeGuidance(resolvedMode);
 
     // Build messages array with mode-enhanced system prompt
-    const enhancedSystemMessage = `${SYSTEM_MESSAGE}\n\nCURRENT MODE: ${(thinkingMode || 'explore').toUpperCase()}\n${modeGuidance}`;
+    const enhancedSystemMessage = `${SYSTEM_MESSAGE}\n\nCURRENT MODE: ${resolvedMode.toUpperCase()}\n${modeGuidance}`;
 
     const messages: ChatMessage[] = [
       { role: "system", content: enhancedSystemMessage }
@@ -894,8 +909,8 @@ export class AIService {
 
     const reply = await engine.chat.completions.create({
       messages: messages as unknown as Parameters<typeof engine.chat.completions.create>[0]['messages'],
-      temperature: 0.7,
-      max_tokens: 2048,
+      temperature: typeof options?.temperature === 'number' ? options.temperature : 0.7,
+      max_tokens: typeof options?.maxTokens === 'number' ? options.maxTokens : 2048,
     });
 
     const response = reply.choices[0].message.content || "";
