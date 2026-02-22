@@ -430,7 +430,7 @@ function analyzeChatIntent(
         : ranked.filter((entry) => entry.score > 0);
 
     if (impacted.length === 0 && activeSectionId) {
-        const active = sectionNodes.find((section) => section.id === activeSectionId);
+        const active = ranked.find((section) => section.id === activeSectionId);
         if (active) impacted = [active];
     }
     if (impacted.length === 0 && ranked.length > 0) {
